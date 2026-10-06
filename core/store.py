@@ -543,6 +543,49 @@ class Store:
         await self.db.execute("DELETE FROM web_sessions WHERE token=?",
                               (str(token or "").strip(),))
 
+    # ---- Dashboard 账号 ↔ QQ 号 -----------------------------------------
+    #
+    # 网页令牌存不住（插件页面是沙箱 iframe，localStorage 抛异常），
+    # 所以「关联」必须落在服务端。Dashboard 登录名不依赖浏览器存储，
+    # 是唯一可靠的锚点。
+    async def link_dashboard_user(self, username: str, user_id: str) -> None:
+        """把 Dashboard 登录名和 QQ 号绑起来。同一个人重复认领会覆盖。"""
+        username = str(username or "").strip()
+        if not username:
+            raise ValueError("拿不到 Dashboard 登录名，无法记住这次关联")
+        user_id = _require_user(user_id)
+        now = self._now()
+        await self.db.execute(
+            "INSERT INTO dashboard_links (username, user_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(username) DO UPDATE SET user_id=excluded.user_id, "
+            "updated_at=excluded.updated_at",
+            (username, user_id, now, now))
+
+    async def resolve_dashboard_user(self, username: str) -> str:
+        """按 Dashboard 登录名查回 QQ 号。没绑过返回空串（不猜）。"""
+        username = str(username or "").strip()
+        if not username:
+            return ""
+        row = await self.db.query_one(
+            "SELECT user_id FROM dashboard_links WHERE username=?", (username,))
+        return row["user_id"] if row else ""
+
+    async def unlink_dashboard_user(self, username: str, user_id: str) -> None:
+        """解掉「这个 Dashboard 账号 = 这个 QQ 号」这一条。
+
+        **两个条件都要对上。** 只按 username 删的话，万一片面状态不一致
+        （比如页面拿到的名字和当初绑的不是同一个人），就会连别人的关联
+        一起抹掉 —— 解绑是破坏性操作，宁可少删。
+        """
+        username = str(username or "").strip()
+        user_id = str(user_id or "").strip()
+        if not username or not user_id:
+            return
+        await self.db.execute(
+            "DELETE FROM dashboard_links WHERE username=? AND user_id=?",
+            (username, user_id))
+
     async def users_with_handles(self) -> list[str]:
         """列出**至少绑了一个平台**的用户。
 

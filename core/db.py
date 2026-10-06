@@ -42,7 +42,7 @@ from typing import Any, Iterable
 
 # 用 PRAGMA user_version 做迁移版本号。
 # 加新表/加列时：**不要改老语句**，在后面追加一条 _MIGRATIONS 项。
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _TABLES_V1 = """
 -- 用户与账号绑定。
@@ -194,6 +194,30 @@ _MIGRATIONS: list[tuple[int, list[str]]] = [
             PRIMARY KEY (user_id, date)
         )""",
         """CREATE INDEX IF NOT EXISTS idx_tasklog_user ON task_log(user_id, date DESC)""",
+    ]),
+    (4, [
+        # 「Dashboard 登录名 → QQ 号」。**这张表才是"关联能记住"的原因。**
+        #
+        # 插件页面跑在 WebUI 的 iframe 里，那个 iframe 带 sandbox 但
+        # **没有 allow-same-origin**（AstrBot 的
+        # `dashboard/src/views/PluginViewPage.vue`），页面因此处于"不透明源"：
+        # `window.localStorage` 一读一写都抛 SecurityError ——
+        # 网页令牌**根本存不住**，而存不住的令牌等于没有。
+        #
+        # 表现就是：点了「关联」，提示"已关联到 QQ xxx"，可下一次请求不带令牌，
+        # 页面又退回"先关联 QQ 号"，日志面板也永远读不出来。
+        #
+        # 好在 **Dashboard 登录名是服务端的事实**：插件路由能拿到
+        # `request.username`（`astrbot/api/web.py` 的 `PluginRequest` 带进来的，
+        # 由 `require_plugin_scope` 守门），完全不依赖浏览器存储。
+        # 认领绑定码时把「这个账号 = 这个 QQ 号」记下来，之后按账号查回去。
+        """CREATE TABLE IF NOT EXISTS dashboard_links (
+            username    TEXT PRIMARY KEY,
+            user_id     TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_dashlink_user ON dashboard_links(user_id)""",
     ]),
 ]
 

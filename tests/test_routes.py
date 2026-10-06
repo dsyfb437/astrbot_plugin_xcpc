@@ -72,7 +72,7 @@ def check(label, ok, detail=""):
 
 class FakeRequest:
     def __init__(self, json_body=None, raw_body=None, query=None,
-                 cookies=None, form_body=None, method="POST"):
+                 cookies=None, form_body=None, method="POST", username=None):
         self._json = json_body
         self._raw = raw_body
         self._form = form_body
@@ -82,6 +82,10 @@ class FakeRequest:
         self.content_type = "application/json" if json_body is not None else None
         self.cookies = cookies or {}
         self.query = _MD(query or {})
+        # Dashboard 登录名。**服务端**给的，不依赖浏览器存储 ——
+        # 真的 PluginRequest 里就是 `self.username = username`
+        # （astrbot/api/web.py，由 require_plugin_scope 守门）。
+        self.username = username
         self.json_calls = 0
         self.body_calls = 0
 
@@ -212,6 +216,8 @@ def test_is_async():
               inspect.iscoroutinefunction(p._route_token))
         check("_route_user_id 是协程函数",
               inspect.iscoroutinefunction(p._route_user_id))
+        check("_route_username 是同步的（它只是读请求属性，没有 await）",
+              not inspect.iscoroutinefunction(p._route_username))
         await p.terminate()
 
     asyncio.run(main_())
@@ -307,6 +313,65 @@ def test_link_route():
 
 
 # ---------------------------------------------------------------------------
+# 2b. 关联必须落在服务端 —— 用户报的那个 bug
+#
+# 现象：网页提示"已关联到 QQ xxx"，可状态页还是"先关联 QQ 号"，
+# 日志面板也一直读不出来。
+#
+# 根因不在绑定码逻辑，而在**令牌存不住**：AstrBot 把插件页面放进带 sandbox、
+# 没有 allow-same-origin 的 iframe 里（dashboard/src/views/PluginViewPage.vue），
+# 页面是不透明源，`window.localStorage` 一读一写都抛 SecurityError。
+#
+# 所以下面这些假 request **故意一个字都不带 `_wt`** ——
+# 这正是沙箱 iframe 里发出来的真实请求。
+# ---------------------------------------------------------------------------
+
+def test_link_survives_without_token():
+    print("\n[2b] 令牌存不住时，关联还得记住")
+
+    async def main_():
+        tmp = tempfile.mkdtemp(prefix="xcpc_rt4_")
+        p = await make_plugin(tmp)
+        await p.store.ensure_user("qq3003")
+        code = await p.store.create_link_code("qq3003")
+
+        # 认领的那一刻请求里有「Dashboard 登录名」，这是服务端事实
+        bind(p, FakeRequest(json_body={"code": code}, username="admin"))
+        res = await p.account_link()
+        check("关联成功", bool(res.get("ok")), repr(res))
+        check("并且记在了服务端（remembered=True）",
+              res.get("remembered") is True, repr(res))
+
+        # ① 关掉浏览器再打开：localStorage 里什么都没有，只有 Dashboard 登录名
+        bind(p, FakeRequest(json_body={}, username="admin"))
+        uid = await p._route_user_id()
+        check("没有令牌也能认出 QQ 号", uid == "qq3003", repr(uid))
+        st = await p.account_status()
+        check("状态页不再退回 need_link",
+              st.get("user_id") == "qq3003" and not st.get("need_link"),
+              repr(st)[:200])
+
+        # ② 日志面板同理（原来这里一直显示"读日志失败"）
+        lg = await p.account_log()
+        check("日志面板读得出来",
+              "lines" in lg and not lg.get("need_link"), repr(lg)[:200])
+
+        # ③ 别人的 Dashboard 账号不该蹭到
+        bind(p, FakeRequest(json_body={}, username="someone-else"))
+        check("没绑过的账号认不出身份（不猜）",
+              await p._route_user_id() == "")
+
+        # ④ 解绑之后服务端那条关联也要断掉
+        bind(p, FakeRequest(json_body={}, username="admin"))
+        await p.account_unlink()
+        check("解绑后服务端关联也没了", await p._route_user_id() == "")
+
+        await p.terminate()
+
+    asyncio.run(main_())
+
+
+# ---------------------------------------------------------------------------
 # 3. 其它路由也要能跑通
 # ---------------------------------------------------------------------------
 
@@ -391,6 +456,7 @@ def main() -> int:
     test_is_async()
     test_body_is_read()
     test_link_route()
+    test_link_survives_without_token()
     test_other_routes()
     test_fake_matches_real()
     print("\n" + "=" * 62)

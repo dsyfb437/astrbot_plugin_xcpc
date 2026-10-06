@@ -42,7 +42,12 @@
     var p = (method === "POST") ? bridge.apiPost(path, body || {})
                                 : bridge.apiGet(path, body || undefined);
     return Promise.resolve(p).then(function (data) {
-      if (data && data.error) { throw new Error(data.error); }
+      if (data && data.error) {
+        var err = new Error(data.error);
+        // 标记出来，好让调用方把"还没关联"和"真出错了"分开说
+        err.needLink = !!(data && data.need_link);
+        throw err;
+      }
       return data;
     });
   }
@@ -87,11 +92,25 @@
   function getToken() {
     try { return window.localStorage.getItem(WT_KEY) || ""; } catch (e) { return ""; }
   }
+  /**
+   * 存令牌，**如实返回成没成功**。
+   *
+   * AstrBot 把插件页面放进带 sandbox、没有 allow-same-origin 的 iframe 里，
+   * 页面处于"不透明源"，`localStorage` 一读一写都抛 SecurityError。
+   * 旧版这里把异常吞了就完事，于是界面说"已关联"、实际什么都没记住。
+   *
+   * 现在真正让关联活下来的是服务端：/link 会把「Dashboard 账号 = QQ 号」
+   * 写进数据库，之后每次请求按账号查回来。这里的返回值为假时，
+   * 上层会**照实说明**，而不是继续显示"已关联"。
+   */
   function setToken(t) {
     try {
       if (t) { window.localStorage.setItem(WT_KEY, t); }
       else { window.localStorage.removeItem(WT_KEY); }
-    } catch (e) { /* 隐私模式下可能写不了，那就每次都要重新关联 */ }
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   /** 把令牌塞进请求体 / 查询串。GET 用查询串，POST 用请求体。 */
@@ -362,7 +381,10 @@
         box.scrollTop = box.scrollHeight;
       })
       .catch(function (e) {
-        box.textContent = "读日志失败：" + (e.message || e);
+        // 「还没关联」不是故障，别拿一坨多行的内部说明吓人
+        box.textContent = e && e.needLink
+          ? "还没关联 QQ 号 —— 先在上面输入绑定码（在 QQ 里发 /绑定 拿）。"
+          : "读日志失败：" + (e.message || e);
       });
   }
 
@@ -391,11 +413,20 @@
             msg.className = "msg err";
             return;
           }
-          setToken(r.web_token);
+          var kept = setToken(r.web_token);
           inp.value = "";
-          msg.textContent = "已关联到 QQ " + r.user_id;
-          msg.className = "msg ok";
+          if (r.remembered === false && !kept) {
+            // 服务端没记住、浏览器也存不住 —— 那就照实说，别显示"已关联"
+            msg.textContent = "绑定码验证通过（QQ " + r.user_id + "），但这次关联"
+              + "没能记住：服务端拿不到 Dashboard 账号，这个页面又存不住令牌"
+              + "（AstrBot 的沙箱 iframe 里 localStorage 不可用）。请把这句话发给我。";
+            msg.className = "msg err";
+          } else {
+            msg.textContent = "已关联到 QQ " + r.user_id;
+            msg.className = "msg ok";
+          }
           load();
+          loadLog();   // 关联前日志面板一直显示"还没关联"，这里顺手刷掉
         })
         .catch(function (e) {
           linkBtn.disabled = false;

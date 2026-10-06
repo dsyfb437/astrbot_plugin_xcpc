@@ -387,6 +387,60 @@ def test_link_code():
     asyncio.run(main())
 
 
+def test_dashboard_link():
+    print("\n[6b] Dashboard 账号 ↔ QQ 号（网页令牌存不住时的唯一依靠）")
+
+    async def main():
+        db, s = new_store()
+        await db.open()
+
+        # 为什么需要这张表：插件页面跑在 AstrBot 带 sandbox、没有
+        # allow-same-origin 的 iframe 里，`localStorage` 一读就抛
+        # SecurityError —— 网页令牌**存不住**。
+        # Dashboard 登录名是服务端给的，不受浏览器存储影响。
+        await s.link_dashboard_user("admin", "qq1001")
+        check("按 Dashboard 账号能查回 QQ 号",
+              await s.resolve_dashboard_user("admin") == "qq1001")
+        check("没绑过的账号查不出东西（不猜）",
+              await s.resolve_dashboard_user("nobody") == "")
+        check("空账号名查不出东西", await s.resolve_dashboard_user("") == "")
+
+        # **多人**：两个 Dashboard 账号、两个 QQ 号，互不干扰
+        await s.link_dashboard_user("admin2", "qq2002")
+        check("第二个账号是独立的",
+              await s.resolve_dashboard_user("admin2") == "qq2002")
+        check("第一个账号没被动过",
+              await s.resolve_dashboard_user("admin") == "qq1001")
+
+        # 同一个人重新认领（换了 QQ 号）要覆盖，不是插第二行
+        await s.link_dashboard_user("admin", "qq3003")
+        check("重新认领会覆盖",
+              await s.resolve_dashboard_user("admin") == "qq3003")
+        rows = await db.query("SELECT username FROM dashboard_links")
+        check("没有留下重复行（是 upsert 不是 insert）", len(rows) == 2,
+              "实际 %d 行" % len(rows))
+
+        # 解绑两个条件都要对上，不能顺手删掉别人
+        await s.unlink_dashboard_user("admin", "qq1001")   # 已经换成 qq3003 了
+        check("user_id 对不上时不删",
+              await s.resolve_dashboard_user("admin") == "qq3003")
+        await s.unlink_dashboard_user("admin", "qq3003")
+        check("对上了才删", await s.resolve_dashboard_user("admin") == "")
+        check("别人的关联不受影响",
+              await s.resolve_dashboard_user("admin2") == "qq2002")
+
+        # 空账号名不许写进去 —— 否则会变成一行谁都查得到的"公共"关联
+        try:
+            await s.link_dashboard_user("   ", "qq1001")
+            check("空账号名被拒绝", False)
+        except ValueError:
+            check("空账号名被拒绝", True)
+
+        await db.close()
+
+    asyncio.run(main())
+
+
 def test_task_log():
     print("\n[7] 打卡 / 执行率循环闭环")
 
@@ -467,6 +521,7 @@ def main() -> int:
     test_difficulty_semantics()
     test_validation()
     test_link_code()
+    test_dashboard_link()
     test_task_log()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))

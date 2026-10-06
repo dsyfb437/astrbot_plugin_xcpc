@@ -451,7 +451,7 @@ class XcpcPlugin(Star):
                   "网页本身不知道你是谁。）")
 
     async def account_link(self):
-        """POST accounts/link —— 用绑定码换网页令牌。"""
+        """POST accounts/link —— 用绑定码换网页令牌，并把关联记在服务端。"""
         body = await self._route_body()
         code = str(body.get("code") or "").strip()
         if self.store is None:
@@ -463,18 +463,43 @@ class XcpcPlugin(Star):
         if not token:
             # uid 位置这时是原因说明
             return {"ok": False, "error": uid}
+        # 令牌只是"这次请求恰好带着它"的凭证 —— **它存不住**（沙箱 iframe 里
+        # localStorage 抛异常）。真正让关联记住的是下面这一步：
+        # 把 Dashboard 登录名和 QQ 号写进 dashboard_links。
+        username = self._route_username()
+        remembered = False
+        if username:
+            try:
+                await self.store.link_dashboard_user(username, uid)
+                remembered = True
+            except Exception as exc:                    # noqa: BLE001
+                if self.log:
+                    self.log.event("web.dashlink_fail", user_id=uid, ok=False,
+                                   error_kind="数据库错误", detail=str(exc))
         if self.log:
             self.log.event("web.link_ok", user_id=uid)
-        return {"ok": True, "web_token": token, "user_id": uid}
+        return {"ok": True, "web_token": token, "user_id": uid,
+                "remembered": remembered}
 
     async def account_unlink(self):
         """POST accounts/unlink —— 断开网页与 QQ 号的关联。"""
+        # 先认出"现在是谁" —— 下面的解绑要靠它，顺序反了就先把自己弄丢了
+        user_id = await self._route_user_id()
         token = await self._route_token()
         if token and self.store is not None:
             try:
                 await self.store.revoke_web_token(token)
             except Exception:
                 pass
+        # 服务端那条关联也要一起断，否则刷新一下页面又"自己认回来了"
+        username = self._route_username()
+        if username and user_id and self.store is not None:
+            try:
+                await self.store.unlink_dashboard_user(username, user_id)
+            except Exception as exc:                    # noqa: BLE001
+                if self.log:
+                    self.log.event("web.dashlink_fail", user_id=user_id, ok=False,
+                                   error_kind="数据库错误", detail=str(exc))
         return {"ok": True}
 
     async def account_status(self):
@@ -756,16 +781,60 @@ class XcpcPlugin(Star):
             pass
         return ""
 
+    def _route_username(self) -> str:
+        """当前请求背后的 **AstrBot Dashboard 登录名**。拿不到返回空串。
+
+        这是**服务端**的事实：`astrbot/api/web.py` 的 `PluginRequest` 会把
+        Dashboard 的登录名一路带进来（`self.username = username`），路由本身
+        又由 `require_plugin_scope` 守门 —— 见
+        `astrbot/dashboard/api/plugins.py` 的 `_call_plugin_extension`。
+        （读源码确认的，不是猜的。）
+
+        为什么非要它不可：插件页面跑在 WebUI 的 iframe 里，那个 iframe 带
+        sandbox 但**没有 allow-same-origin**，页面是不透明源，
+        `window.localStorage` 一读就抛 SecurityError —— **网页令牌存不住**。
+        存不住的令牌等于没有：点了「关联」提示成功，下一次请求却不带令牌，
+        页面又退回「先关联 QQ 号」，日志也永远读不出来。
+
+        Dashboard 登录名不依赖任何浏览器存储，所以它是那个能持久化的锚点。
+        """
+        req = self._route_request()
+        if req is None:
+            return ""
+        try:
+            name = str(getattr(req, "username", None) or "").strip()
+            if name:
+                return name
+        except Exception:                                # noqa: BLE001
+            pass
+        try:
+            g = getattr(getattr(req, "state", None), "dashboard_g", None)
+            name = str(getattr(g, "username", None) or "").strip()
+            if name:
+                return name
+        except Exception:                                # noqa: BLE001
+            pass
+        return ""
+
     async def _route_user_id(self) -> str:
         """当前网页会话对应的 **QQ 号**。拿不到就返回空串。
 
+        两条路，按可靠性排：
+
+        ① 网页令牌（`_wt`）—— 最明确，谁拿着令牌就是谁。
+           但它**只在页面恰好带着它的时候**才有用：插件页面是沙箱 iframe
+           （没有 allow-same-origin），`localStorage` 一读一写就抛
+           SecurityError，令牌根本存不住。这条路失效是**静默**的，
+           所以不能只靠它。
+
+        ② **Dashboard 登录名**（`request.username`）—— 服务端给的事实，
+           不依赖浏览器存储。认领绑定码时把「这个账号 = 这个 QQ 号」写进
+           `dashboard_links`，之后每次按账号查回来。这才是关联能记住的原因。
+
         网页上没有 QQ 号，而 AstrBot 的插件页面 token 只绑到「插件+页面」、
         **不带用户身份**（`build_initial_context` 里只解出 plugin_name /
-        page_name / locale）。`request.username` 是 Dashboard 登录名，也不是 QQ 号。
-        —— 这两条是我读了 AstrBot 源码确认的，不是猜的。
-
-        所以：**页面必须先认领一个绑定码**（在 QQ 里发 `/绑定` 拿到），
-        服务端验证后发一个网页令牌，之后每次请求带上它。
+        page_name / locale）。所以页面**仍然必须先认领一个绑定码**
+        （在 QQ 里发 `/绑定` 拿到）。
 
         为什么不在配置里填个 QQ 号了事：那样**谁都填得了**，
         填错了还会把 A 的账号绑成 B 的 —— 多用户系统里最严重的一类错误。
@@ -774,16 +843,31 @@ class XcpcPlugin(Star):
         ⚠️ **返回空串而不是兜底身份。** 上层会因此拿到明确错误，
         而不是静默操作了别人的数据。
         """
+        if self.store is None:
+            return ""
         token = await self._route_token()
-        if not token or self.store is None:
-            return ""
-        try:
-            return await self.store.resolve_web_token(token)
-        except Exception as exc:                        # noqa: BLE001
-            if self.log:
-                self.log.event("web.token_fail", ok=False, error_kind="数据库错误",
-                               detail=str(exc))
-            return ""
+        if token:
+            try:
+                uid = await self.store.resolve_web_token(token)
+            except Exception as exc:                    # noqa: BLE001
+                uid = ""
+                if self.log:
+                    self.log.event("web.token_fail", ok=False,
+                                   error_kind="数据库错误", detail=str(exc))
+            if uid:
+                return uid
+        username = self._route_username()
+        if username:
+            try:
+                uid = await self.store.resolve_dashboard_user(username)
+            except Exception as exc:                    # noqa: BLE001
+                if self.log:
+                    self.log.event("web.dashlink_fail", ok=False,
+                                   error_kind="数据库错误", detail=str(exc))
+                return ""
+            if uid:
+                return uid
+        return ""
 
     # ======================================================================
     # 后端 & 配置
