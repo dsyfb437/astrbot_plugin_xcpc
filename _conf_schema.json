@@ -1,0 +1,132 @@
+{
+  "data_root": {
+    "description": "数据目录（数据库与日志放这）",
+    "type": "string",
+    "default": "",
+    "hint": "留空 = 用插件自己的 data 目录。填绝对路径可以放到别处。目录里的 xcpc.db 存做题记录，logs/ 存日志。**每个 QQ 号的数据在这个库里按用户隔离。**"
+  },
+  "llm_provider_id": {
+    "description": "用哪个模型生成方案",
+    "type": "string",
+    "default": "",
+    "hint": "留空 = 用当前会话的默认模型。/方案 会用它把数据汇总推理成「下一步做什么」。⚠️ 这不是降级开关 —— 模型调不通时插件会**明确报错**，不会退化成规则方案。",
+    "obvious_hint": true
+  },
+  "plan_max_minutes": {
+    "description": "每天训练时长上限（分钟）",
+    "type": "int",
+    "default": 200,
+    "hint": "超过这个数会提醒你计划偏满。默认 200 分钟，考虑你还有课。"
+  },
+  "sync_interval_min": {
+    "description": "自动同步间隔（分钟）",
+    "type": "int",
+    "default": 60,
+    "hint": "0 = 不自动同步，只用 /同步 手动触发。各站点有速率限制，不建议低于 30。"
+  },
+  "rate_limit_scale": {
+    "description": "拉取速度倍率",
+    "type": "float",
+    "default": 1.0,
+    "hint": "1.0 = 默认速度（CF 约 1 请求/秒）。调小更慢更安全，调大有硬下限保护 —— 太快会被站点封。"
+  },
+  "log_level": {
+    "description": "日志级别",
+    "type": "string",
+    "options": ["info", "debug"],
+    "default": "info",
+    "hint": "debug 会记录每一次 HTTP 请求（URL/状态码/耗时），排查同步问题时用。/日志 可以直接看。凭据在这之前就已经打码了。"
+  },
+  "backend": {
+    "description": "数据后端",
+    "type": "string",
+    "options": ["file", "http"],
+    "default": "file",
+    "hint": "file = 直接读写 XCPC 工作区文件，要求 AstrBot 与工作区在同一台机器；http = 调工作区里 serve.py 的 HTTP 接口，适合 AstrBot 在服务器上",
+    "obvious_hint": true
+  },
+  "workspace_root": {
+    "description": "XCPC 工作区根目录（绝对路径）",
+    "type": "string",
+    "default": "",
+    "hint": "backend=file 时必填。例如 Windows: C:\\\\Users\\\\you\\\\Documents\\\\deepseek-harness\\\\default-workspace\\\\xcpc ｜ Linux: /home/you/xcpc"
+  },
+  "handle": {
+    "description": "Codeforces 用户名（旧 backend 用）",
+    "type": "string",
+    "default": "",
+    "hint": "只有 backend=file/http 时才用得上，用来找 data/<handle>_status.json 这类文件。留空的话那几个旧命令会明确告诉你去填，而不是猜一个。"
+  },
+  "http_base": {
+    "description": "复盘台地址",
+    "type": "string",
+    "default": "http://127.0.0.1:8787",
+    "hint": "backend=http 时使用。就是 serve.py 监听的地址"
+  },
+  "http_token": {
+    "description": "复盘台访问码",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "serve.py 启动时打印的那个 4 位码（URL 里的 ?k=xxxx）。serve.py 用 --no-token 启动就留空"
+  },
+  "http_timeout": {
+    "description": "HTTP 超时（秒）",
+    "type": "int",
+    "default": 20,
+    "hint": "复盘台在跑 /api/refresh 时会比较慢"
+  },
+  "penalty_per_fail": {
+    "description": "罚时：每次失败罚几分钟",
+    "type": "int",
+    "default": 20,
+    "hint": "ICPC/QOJ/大多数区域赛 = 20，Codeforces = 10。粘贴榜单/提交记录时会用它估罚时。嫌改配置麻烦的话，在消息正文第一行单独写个 cf 也能按 10 算"
+  },
+  "admin_only": {
+    "description": "只允许 AstrBot 管理员使用",
+    "type": "bool",
+    "default": true,
+    "hint": "这个插件会往真实文件里写字，默认只让管理员用。想放开就关掉它，改用下面的白名单"
+  },
+  "allow_senders": {
+    "description": "允许使用的用户 ID 白名单",
+    "type": "list",
+    "default": [],
+    "hint": "填 QQ 号。一旦填了，就只有名单里的号能用（优先级高于 admin_only）"
+  },
+  "max_reply_chars": {
+    "description": "单条回复最大字数",
+    "type": "int",
+    "default": 900,
+    "hint": "超过就按行切成多条发。QQ 单条消息有长度上限，别设太大"
+  },
+  "status_as_image": {
+    "description": "/状态 渲染成图片",
+    "type": "bool",
+    "default": false,
+    "hint": "用 AstrBot 自带的文转图。没配 t2i 服务就保持关闭，否则每次都会退回文本（多花一次失败等待）"
+  },
+  "list_preview": {
+    "description": "/题单 每份题单显示几道",
+    "type": "int",
+    "default": 5
+  },
+  "daily_push": {
+    "description": "每日推送",
+    "type": "bool",
+    "default": true,
+    "hint": "每天晚上推一条：比赛倒计时 + 今天没勾完的任务 + 复盘提醒。先在会话里发 /订阅，然后发 /推送测试 当场验证。QQ 个人号（NapCat/aiocqhttp）支持主动消息；QQ 官方机器人不支持，开了也推不出去"
+  },
+  "push_time": {
+    "description": "每日推送时间",
+    "type": "string",
+    "default": "22:30",
+    "hint": "24 小时制 HH:MM，按北京时间算（服务器时区是 UTC 也不影响）"
+  },
+  "push_umo": {
+    "description": "固定推送目标",
+    "type": "string",
+    "default": "",
+    "hint": "可选。形如 aiocqhttp:FriendMessage:1234567。一般用 /订阅 就够了，不用手填"
+  }
+}

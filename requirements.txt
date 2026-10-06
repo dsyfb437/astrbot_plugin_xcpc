@@ -1,0 +1,6 @@
+# astrbot_plugin_xcpc 的依赖
+#
+# 其实**一个都不用装**：核心逻辑（xcpc_core.py）只用了 Python 标准库。
+# 下面这行只有在你把 backend 设成 "http"（让插件去调工作区的 serve.py）时才需要。
+# AstrBot 本体已经依赖 aiohttp，所以这一行通常也是空操作。
+aiohttp>=3.9

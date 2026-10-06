@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行期数据 —— 里面有 cookie 和 SQLite，**绝对不能进仓库**
+data/
+config/
+logs/
+*.db
+*.db-wal
+*.db-shm
+auth/
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store

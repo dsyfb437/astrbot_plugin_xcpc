@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>账号绑定 · XCPC 备赛助手</title>
+<style>
+  /* 颜色跟 AstrBot 的主题走（Dashboard 会注入 CSS 变量），并给一套回退值，
+     这样单独打开这个页面也不会变成白板。 */
+  :root{
+    --bg: var(--vscode-editor-background, #ffffff);
+    --fg: var(--vscode-editor-foreground, #1f2328);
+    --muted: #6e7787;
+    --line: #d8dee4;
+    --card: var(--vscode-sideBar-background, #f6f8fa);
+    --accent: var(--vscode-button-background, #1d4ed8);
+    --accent-fg: var(--vscode-button-foreground, #ffffff);
+    --good: #1a7f37; --warn: #9a6700; --bad: #d1242f;
+  }
+  *{ box-sizing: border-box; }
+  body{
+    margin:0; padding:16px; background:var(--bg); color:var(--fg);
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Microsoft YaHei", sans-serif;
+  }
+  h1{ font-size:16px; margin:0 0 4px; }
+  .sub{ color:var(--muted); font-size:12px; margin-bottom:16px; }
+  .card{
+    background:var(--card); border:1px solid var(--line); border-radius:10px;
+    padding:14px 16px; margin-bottom:12px;
+  }
+  .card h2{ font-size:13px; margin:0 0 2px; display:flex; align-items:center; gap:8px; }
+  .card .hint{ color:var(--muted); font-size:12px; margin:0 0 12px; }
+  .row{ display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; }
+  label{ display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
+  input{
+    width:100%; min-width:0; padding:8px 10px; font:inherit; font-size:13px;
+    color:var(--fg); background:var(--bg);
+    border:1px solid var(--line); border-radius:6px;
+  }
+  input:focus{ outline:2px solid var(--accent); outline-offset:-1px; }
+  .grow{ flex:1 1 160px; min-width:0; }
+  button{
+    font:inherit; font-size:13px; padding:8px 14px; border:0; border-radius:6px;
+    background:var(--accent); color:var(--accent-fg); cursor:pointer;
+    min-height:36px; white-space:nowrap;
+  }
+  button:active{ transform:translateY(1px); }
+  button.ghost{ background:transparent; color:var(--fg); border:1px solid var(--line); }
+  button[disabled]{ opacity:.5; cursor:default; transform:none; }
+  .badge{
+    display:inline-block; padding:1px 8px; border-radius:4px; font-size:11px;
+    font-weight:500;
+  }
+  .badge.valid{   background:#dafbe1; color:var(--good); }
+  .badge.expired{ background:#fff8c5; color:var(--warn); }
+  .badge.error{   background:#ffebe9; color:var(--bad); }
+  .badge.unbound{ background:var(--line); color:var(--muted); }
+  .msg{ margin-top:10px; font-size:12px; white-space:pre-wrap; }
+  .msg.err{ color:var(--bad); }
+  .msg.ok{ color:var(--good); }
+  .log{
+    background:var(--bg); border:1px solid var(--line); border-radius:6px;
+    padding:8px 10px; font-family:ui-monospace, Consolas, monospace;
+    font-size:11px; line-height:1.5; max-height:220px; overflow:auto;
+    white-space:pre-wrap; word-break:break-all;
+  }
+  .empty{ color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+  <h1>账号绑定</h1>
+  <div class="sub">
+    每个 QQ 号绑定自己的账号 —— 数据按 QQ 号隔离，别人看不到你的。
+  </div>
+
+  <!-- 关联 QQ 号。
+       网页本身不知道你是谁（AstrBot 的页面 token 只绑到「插件+页面」，
+       不带用户身份），所以必须先用绑定码证明一次。
+       这块在关联之后会自动隐藏。 -->
+  <div class="card" id="linkCard">
+    <h2>关联 QQ 号</h2>
+    <p class="hint">
+      在 QQ 里给机器人发 <b>/绑定</b>，它会给你一个 6 位绑定码，填在这里。
+    </p>
+    <div class="row">
+      <div class="grow">
+        <label>绑定码</label>
+        <input id="linkCode" type="text" placeholder="例如 K7M2QP"
+               autocomplete="off" maxlength="10"
+               style="text-transform:uppercase; letter-spacing:2px;">
+      </div>
+      <button id="linkBtn">关联</button>
+    </div>
+    <div class="msg" id="linkMsg"></div>
+  </div>
+
+  <div id="cards">
+    <div class="empty">正在读取状态…</div>
+  </div>
+
+  <div class="card">
+    <h2>最近日志</h2>
+    <p class="hint">凭据（Cookie / 密码 / token）在写入前已自动打码。</p>
+    <div class="log" id="log">（暂无）</div>
+    <button class="ghost" id="refreshLog">刷新日志</button>
+  </div>
+
+  <!-- 必须先加载 Dashboard 的 bridge SDK，app.js 才有 window.AstrBotPluginPage。
+       少了这一行，页面会显示"拿不到 bridge"。 -->
+  <script src="/api/plugin/page/bridge-sdk.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
