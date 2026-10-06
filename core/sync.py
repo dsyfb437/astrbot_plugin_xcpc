@@ -12,7 +12,7 @@
    用户会以为自己在洛谷没做过题 —— 这是最危险的一类静默错误。
 
 同一 `(user_id, platform)` 同时只允许一个同步在跑（`sync_lock`），
-免得定时任务和手动 `/同步` 撞车。
+免得定时任务和手动 `/xcpc 同步` 撞车。
 """
 
 from __future__ import annotations
@@ -158,7 +158,7 @@ class Syncer:
     async def sync_one(self, user_id: str, platform: str,
                        with_contests: bool = True) -> PlatformResult:
         """同步单个平台。**永远返回结果对象，不抛异常** ——
-        一个平台挂了不该让整次 `/同步` 崩掉。"""
+        一个平台挂了不该让整次 `/xcpc 同步` 崩掉。"""
         import time
         started = time.monotonic()
         res = PlatformResult(platform=platform, ok=False)
@@ -297,13 +297,13 @@ class Syncer:
         连带这些全部失效：
           * 按标签的强弱分析
           * 难度回避判定（整个产品的卖点之一）
-          * 候选池 → `/方案` 没有任何题可推
+          * 候选池 → `/xcpc 方案` 没有任何题可推
 
         也就是说**功能写了但不可达**。这种"实现了但接不出来"的缺口最隐蔽：
         代码是好的、测试是绿的，但用户永远用不到。
 
         所以接进 `sync()`：**题库空的时候自动拉一次**。
-        `force=True` 时无条件重拉（给 `/题库` 命令用）。
+        `force=True` 时无条件重拉（给 `/xcpc 题库` 命令用）。
         """
         if not force:
             try:

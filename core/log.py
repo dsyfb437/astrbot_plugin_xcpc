@@ -141,7 +141,7 @@ def stamp() -> str:
 class Recorder:
     """结构化日志：写文件 + 走 AstrBot logger + 在内存里留一份环形缓冲。
 
-    环形缓冲是给 `/日志 [n]` 用的 —— 用户不该为了看一眼日志去开网页。
+    环形缓冲是给 `/xcpc 日志 [n]` 用的 —— 用户不该为了看一眼日志去开网页。
     """
 
     def __init__(self, log_path: str, level: str = "info",
@@ -279,7 +279,7 @@ class Recorder:
         self._emit(line, level)
         return line
 
-    # ---- 读取（给 /日志 命令）------------------------------------------
+    # ---- 读取（给 /xcpc 日志 命令）------------------------------------------
     def tail(self, n: int = 20, user_id: str = "") -> list[str]:
         """最近 n 条。传 user_id 时只返回与该用户相关或全局的行。
 

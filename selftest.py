@@ -557,18 +557,18 @@ def test_paste_merge() -> None:
           core.merge_contest_into_draft(
               core.ReviewDraft(), one)["applied"] is False)
 
-    # ---- /解析 的回报：内容要全（类型/题数/顺序/罚时/形状/没看懂的行）----
+    # ---- /xcpc 解析 的回报：内容要全（类型/题数/顺序/罚时/形状/没看懂的行）----
     reply = core.format_parse_reply(_fake_parsed())
-    check("/解析 说类型", "提交记录" in reply, reply[:120])
-    check("/解析 说提交条数", "5 条" in reply, reply[:200])
-    check("/解析 说过题数", "过题：2 道" in reply, reply[:200])
-    check("/解析 说 AC 顺序", "AC 顺序：A>B" in reply, reply[:200])
-    check("/解析 给估算罚时", "估算罚时：41 分钟" in reply, reply[:400])
-    check("/解析 给算式", "A 0  +  B 1+20×2" in reply, reply[:400])
-    check("/解析 提醒平台规则", "Codeforces 是 10" in reply, reply[:400])
-    check("/解析 给『比赛的形状』", "比赛的形状" in reply and "TLE" in reply, reply[-400:])
-    check("/解析 给时间线", "时间线" in reply, reply[-400:])
-    check("/解析 明说没落盘", "没有写任何文件" in reply, reply[:40])
+    check("/xcpc 解析 说类型", "提交记录" in reply, reply[:120])
+    check("/xcpc 解析 说提交条数", "5 条" in reply, reply[:200])
+    check("/xcpc 解析 说过题数", "过题：2 道" in reply, reply[:200])
+    check("/xcpc 解析 说 AC 顺序", "AC 顺序：A>B" in reply, reply[:200])
+    check("/xcpc 解析 给估算罚时", "估算罚时：41 分钟" in reply, reply[:400])
+    check("/xcpc 解析 给算式", "A 0  +  B 1+20×2" in reply, reply[:400])
+    check("/xcpc 解析 提醒平台规则", "Codeforces 是 10" in reply, reply[:400])
+    check("/xcpc 解析 给『比赛的形状』", "比赛的形状" in reply and "TLE" in reply, reply[-400:])
+    check("/xcpc 解析 给时间线", "时间线" in reply, reply[-400:])
+    check("/xcpc 解析 明说没落盘", "没有写任何文件" in reply, reply[:40])
 
     # 没能理解的行必须**原样**列出来（不能静默丢）
     parsed_warn = core.normalize_contest_result({
@@ -579,8 +579,8 @@ def test_paste_merge() -> None:
         "warnings": ["有 1 行没能理解（原样列出）：", "  Rank 1234 someone 1713"],
     })
     reply2 = core.format_parse_reply(parsed_warn)
-    check("/解析 列出没理解的行", "Rank 1234 someone 1713" in reply2, reply2)
-    check("/解析 自己那句统计头不重复出现",
+    check("/xcpc 解析 列出没理解的行", "Rank 1234 someone 1713" in reply2, reply2)
+    check("/xcpc 解析 自己那句统计头不重复出现",
           "有 1 行没能理解" not in reply2, reply2)
     check("榜单没提交时罚时明说算不出来",
           "算不出来" in reply2 and "缺时间信息" in reply2, reply2)
@@ -589,9 +589,9 @@ def test_paste_merge() -> None:
     none_reply = core.format_parse_reply(core.normalize_contest_result(
         {"ok": True, "kind": "none", "rows": [], "timeline": [],
          "submission_count": 0, "warnings": ["没能从这段文本里认出任何题目。"]}))
-    check("/解析：认不出时给提示", "没认出榜单或提交记录" in none_reply, none_reply)
+    check("/xcpc 解析：认不出时给提示", "没认出榜单或提交记录" in none_reply, none_reply)
     err_reply = core.format_parse_reply(core.empty_contest_result("没有 02-tools"))
-    check("/解析：解析器缺失时报错不报栈", "解析不了" in err_reply
+    check("/xcpc 解析：解析器缺失时报错不报栈", "解析不了" in err_reply
           and "02-tools" in err_reply, err_reply)
 
     # ---- 两个后端必须是同一种结构（上层才不用管用的是哪个）----
@@ -764,7 +764,7 @@ def test_paste_backend(root: str | None) -> None:
 
 
 # ==========================================================================
-# 9. main.py 的接线（用一个 astrbot 外壳驱动 /复盘 和 /解析）
+# 9. main.py 的接线（用一个 astrbot 外壳驱动 /xcpc 复盘 和 /xcpc 解析）
 # ==========================================================================
 # main.py 依赖 astrbot，平时只能放进真的 AstrBot 里跑。但这次改动的**接线**
 # 全在 main.py 里（什么时候调后端、怎么把结果并进 draft、回报什么），
@@ -806,6 +806,21 @@ def _install_astrbot_stub():
         def regex(self, *args, **kwargs):
             def deco(fn):
                 return fn
+            return deco
+
+        def command_group(self, group_name, *a, **kw):
+            """`@filter.command_group("xcpc")` 这个装饰器执行完，函数名会被绑到
+            一个带 `.command` 的组对象上（AstrBot 里是 RegisteringCommandable），
+            子指令再挂 `@xcpc.command`。这里照这个形状做。"""
+            class _Group:
+                def command(self, *a, **kw):
+                    def deco(fn):
+                        return fn
+                    return deco
+                regex = command
+
+            def deco(fn):
+                return _Group()
             return deco
 
     class Star:
@@ -888,7 +903,7 @@ def _review_files(root):
 
 
 def test_main_handlers(root: str | None) -> None:
-    print("\n[9] main.py 接线（/复盘 与 /解析，用 astrbot 外壳驱动）")
+    print("\n[9] main.py 接线（/xcpc 复盘 与 /xcpc 解析，用 astrbot 外壳驱动）")
     if not root:
         print("      （跳过：没找到带 02-tools/standings.py 的工作区）")
         return
@@ -921,109 +936,109 @@ def test_main_handlers(root: str | None) -> None:
               plugin._per_fail() == core.DEFAULT_PER_FAIL, str(plugin._per_fail()))
         plugin.config["penalty_per_fail"] = 20
 
-        # ---- /复盘 + 粘贴 ----
-        event = _FakeEvent("/复盘 " + SUB_PASTE_E2E)
+        # ---- /xcpc 复盘 + 粘贴 ----
+        event = _FakeEvent("/xcpc 复盘 " + SUB_PASTE_E2E)
         _run_handlers(plugin.cmd_review(event))
         reply = "\n".join(event.replies)
-        check("/复盘：有回复", bool(reply), reply[:80])
-        check("/复盘：回报里说自动补了哪些", "自动补上：过题 2、罚时 41、AC 顺序 A>B" in reply,
+        check("/xcpc 复盘：有回复", bool(reply), reply[:80])
+        check("/xcpc 复盘：回报里说自动补了哪些", "自动补上：过题 2、罚时 41、AC 顺序 A>B" in reply,
               reply)
-        check("/复盘：回报里有罚时算式", "B 1+20×2" in reply, reply)
-        check("/复盘：回报里提醒 CF 是 10 分钟/次", "Codeforces 是 10" in reply, reply)
-        check("/复盘：回报里有『比赛的形状』", "B 交了 3 次后过" in reply, reply)
-        check("/复盘：回报里有逐题题号", "逐题记录补了 3 条题号" in reply, reply)
+        check("/xcpc 复盘：回报里有罚时算式", "B 1+20×2" in reply, reply)
+        check("/xcpc 复盘：回报里提醒 CF 是 10 分钟/次", "Codeforces 是 10" in reply, reply)
+        check("/xcpc 复盘：回报里有『比赛的形状』", "B 交了 3 次后过" in reply, reply)
+        check("/xcpc 复盘：回报里有逐题题号", "逐题记录补了 3 条题号" in reply, reply)
 
         files = _review_files(tmp)
-        check("/复盘：文件落了盘", len(files) == 1, str(files))
+        check("/xcpc 复盘：文件落了盘", len(files) == 1, str(files))
         written = ""
         if files:
             with open(os.path.join(tmp, "04-review", files[0]),
                       encoding="utf-8") as fh:
                 written = fh.read()
-        check("/复盘：文件里有补好的过题/罚时",
+        check("/xcpc 复盘：文件里有补好的过题/罚时",
               "| 结果 | 排名 - ｜ 过题 2 ｜ 罚时 41 |" in written,
               repr([x for x in written.splitlines() if "结果" in x]))
-        check("/复盘：文件里有 AC 顺序", "| AC 顺序 | A>B |" in written, written[:400])
-        check("/复盘：逐题表 3 行",
+        check("/xcpc 复盘：文件里有 AC 顺序", "| AC 顺序 | A>B |" in written, written[:400])
+        check("/xcpc 复盘：逐题表 3 行",
               written.count("\n| A |") + written.count("\n| B |")
               + written.count("\n| C |") == 3, written[-500:])
-        check("/复盘：粘贴的流水账没进『想歪的地方』",
+        check("/xcpc 复盘：粘贴的流水账没进『想歪的地方』",
               "Wrong Answer" not in written.split("## 2.")[-1].split("## 3.")[0],
               written.split("## 2.")[-1][:120])
-        check("/复盘：contests.csv 追加了一行",
+        check("/xcpc 复盘：contests.csv 追加了一行",
               os.path.exists(os.path.join(tmp, "03-log", "contests.csv")))
 
-        # ---- /复盘：手打的字段不被覆盖 ----
-        event2 = _FakeEvent("/复盘 比赛: 手打优先\n过题: 3\n罚时: 145\n罚时算式无所谓\n"
+        # ---- /xcpc 复盘：手打的字段不被覆盖 ----
+        event2 = _FakeEvent("/xcpc 复盘 比赛: 手打优先\n过题: 3\n罚时: 145\n罚时算式无所谓\n"
                             + SUB_PASTE)
         _run_handlers(plugin.cmd_review(event2))
         reply2 = "\n".join(event2.replies)
-        check("/复盘：手打的过题/罚时没被覆盖",
+        check("/xcpc 复盘：手打的过题/罚时没被覆盖",
               "过题 3 ｜ 罚时 145" in reply2, reply2)
-        check("/复盘：回报里说明手打的优先", "优先，没被粘贴里的估算顶掉" in reply2, reply2)
+        check("/xcpc 复盘：回报里说明手打的优先", "优先，没被粘贴里的估算顶掉" in reply2, reply2)
         files2 = _review_files(tmp)
         newest = ""
         with open(os.path.join(tmp, "04-review", files2[-1]), encoding="utf-8") as fh:
             newest = fh.read()
-        check("/复盘：落盘文件里也是手打的值",
+        check("/xcpc 复盘：落盘文件里也是手打的值",
               "过题 3 ｜ 罚时 145" in newest, newest[:400])
 
-        # ---- /解析：只回报，不落盘 ----
+        # ---- /xcpc 解析：只回报，不落盘 ----
         before = _review_files(tmp)
         csv_before = os.path.getmtime(os.path.join(tmp, "03-log", "contests.csv"))
-        event3 = _FakeEvent("/解析 " + SUB_PASTE_E2E)
+        event3 = _FakeEvent("/xcpc 解析 " + SUB_PASTE_E2E)
         _run_handlers(plugin.cmd_parse(event3))
         reply3 = "\n".join(event3.replies)
-        check("/解析：有回复", bool(reply3), reply3[:80])
-        check("/解析：说类型和条数", "提交记录" in reply3 and "5 条" in reply3, reply3)
-        check("/解析：给罚时和算式",
+        check("/xcpc 解析：有回复", bool(reply3), reply3[:80])
+        check("/xcpc 解析：说类型和条数", "提交记录" in reply3 and "5 条" in reply3, reply3)
+        check("/xcpc 解析：给罚时和算式",
               "估算罚时：41 分钟" in reply3 and "A 0  +  B 1+20×2" in reply3, reply3)
-        check("/解析：说 AC 顺序", "AC 顺序：A>B" in reply3, reply3)
-        check("/解析：给『比赛的形状』", "比赛的形状" in reply3, reply3)
-        check("/解析：明说没落盘", "没有写任何文件" in reply3, reply3[:60])
-        check("/解析：真的没写文件", _review_files(tmp) == before,
+        check("/xcpc 解析：说 AC 顺序", "AC 顺序：A>B" in reply3, reply3)
+        check("/xcpc 解析：给『比赛的形状』", "比赛的形状" in reply3, reply3)
+        check("/xcpc 解析：明说没落盘", "没有写任何文件" in reply3, reply3[:60])
+        check("/xcpc 解析：真的没写文件", _review_files(tmp) == before,
               str(_review_files(tmp)))
-        check("/解析：也没动 contests.csv",
+        check("/xcpc 解析：也没动 contests.csv",
               os.path.getmtime(os.path.join(tmp, "03-log", "contests.csv")) == csv_before)
-        check("/解析：提醒怎么落盘", "发 /复盘" in reply3, reply3[-120:])
-        print("      /解析 的实际回复：")
+        check("/xcpc 解析：提醒怎么落盘", "发 /xcpc 复盘" in reply3, reply3[-120:])
+        print("      /xcpc 解析 的实际回复：")
         print("      " + reply3.replace("\n", "\n      "))
 
-        # ---- /解析：正文首行 cf → 按 10 分钟/次 ----
-        event4 = _FakeEvent("/解析 cf\n" + SUB_PASTE_E2E)
+        # ---- /xcpc 解析：正文首行 cf → 按 10 分钟/次 ----
+        event4 = _FakeEvent("/xcpc 解析 cf\n" + SUB_PASTE_E2E)
         _run_handlers(plugin.cmd_parse(event4))
         reply4 = "\n".join(event4.replies)
-        check("/解析：cf 提示词按 10 分钟/次算（罚时 21）",
+        check("/xcpc 解析：cf 提示词按 10 分钟/次算（罚时 21）",
               "估算罚时：21 分钟" in reply4 and "B 1+10×2" in reply4, reply4)
 
         # ---- 认不出的内容：退回老行为，不报错 ----
-        event5 = _FakeEvent("/解析 今天天气不错，随便写点什么")
+        event5 = _FakeEvent("/xcpc 解析 今天天气不错，随便写点什么")
         _run_handlers(plugin.cmd_parse(event5))
-        check("/解析：认不出也不炸",
+        check("/xcpc 解析：认不出也不炸",
               event5.replies and "没认出榜单或提交记录" in "\n".join(event5.replies),
               str(event5.replies)[:200])
 
-        event6 = _FakeEvent("/复盘 今天这把很难受，B 题读错了题意")
+        event6 = _FakeEvent("/xcpc 复盘 今天这把很难受，B 题读错了题意")
         _run_handlers(plugin.cmd_review(event6))
         reply6 = "\n".join(event6.replies)
-        check("/复盘：纯自由文本照旧能记", "已记录" in reply6, reply6[:80])
-        check("/复盘：自由文本不会触发粘贴解析那套话",
+        check("/xcpc 复盘：纯自由文本照旧能记", "已记录" in reply6, reply6[:80])
+        check("/xcpc 复盘：自由文本不会触发粘贴解析那套话",
               "解析了你粘的" not in reply6, reply6)
 
-        # ---- 后端给不出解析（老工作区）时，/复盘 仍然要能记 ----
+        # ---- 后端给不出解析（老工作区）时，/xcpc 复盘 仍然要能记 ----
         plugin._backend = core.WorkspaceFS(root=os.path.join(tmp, "没有02-tools"))
-        event7 = _FakeEvent("/复盘 比赛: 老工作区\n过题: 1\n" + SUB_PASTE)
+        event7 = _FakeEvent("/xcpc 复盘 比赛: 老工作区\n过题: 1\n" + SUB_PASTE)
         _run_handlers(plugin.cmd_review(event7))
         reply7 = "\n".join(event7.replies)
-        check("/复盘：解析器缺失也照记（只是没自动补）",
+        check("/xcpc 复盘：解析器缺失也照记（只是没自动补）",
               "已记录" in reply7 and "解析了你粘的" not in reply7, reply7)
-        check("/复盘：解析器缺失时给出提示（这段确实像粘的）",
+        check("/xcpc 复盘：解析器缺失时给出提示（这段确实像粘的）",
               "自动解析没成" in reply7 and "02-tools" in reply7, reply7)
 
-        # 同一个后端下 /解析 要老实报错（不静默）
-        event8 = _FakeEvent("/解析 " + SUB_PASTE)
+        # 同一个后端下 /xcpc 解析 要老实报错（不静默）
+        event8 = _FakeEvent("/xcpc 解析 " + SUB_PASTE)
         _run_handlers(plugin.cmd_parse(event8))
-        check("/解析：后端不可用时报可读原因",
+        check("/xcpc 解析：后端不可用时报可读原因",
               "02-tools" in "\n".join(event8.replies), str(event8.replies)[:200])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

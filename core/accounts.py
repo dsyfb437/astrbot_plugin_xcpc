@@ -264,7 +264,7 @@ class QojLogin:
 
         session.state = S_FAILED
         session.message = ("登录没有拿到会话 cookie，原因不明。"
-                           "把这条连同 /日志 30 一起报给我。")
+                           "把这条连同 /xcpc 日志 30 一起报给我。")
         return session
 
     async def submit_2fa(self, svc, session: Session, code: str) -> Session:
@@ -506,7 +506,7 @@ class AccountService:
         CF / AtCoder 根本不需要登录，它们成功的标志是**有一个合法的 handle**，
         cookie 是空的。我第一版写成 `if state != OK or not cookies: return`，
         结果那两个平台的 handle 永远存不进去 —— 用户看到"验证通过"，
-        转头 `/同步` 却说"还没绑定 handle"。**说了成功却没保存**是最气人的那类 bug。
+        转头 `/xcpc 同步` 却说"还没绑定 handle"。**说了成功却没保存**是最气人的那类 bug。
 
         失败时**什么都不写** —— 尤其不能把"上次的凭据"标记成 valid，
         那会让用户以为还登着。

@@ -125,7 +125,7 @@ class HttpClient:
 
     _hosts: dict[str, _Host] = field(default_factory=dict, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
-    # 失败分类计数，便于 /状态 里显示"同步健康度"
+    # 失败分类计数，便于 /xcpc 状态 里显示"同步健康度"
     error_counts: dict[str, int] = field(default_factory=dict)
 
     RATE_FLOOR = 0.35          # 硬下限：再快也不低于这个间隔

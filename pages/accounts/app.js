@@ -34,14 +34,61 @@
   var BRIDGE_MISSING =
     "拿不到 AstrBotPluginPage —— 这个页面必须通过 AstrBot 的 WebUI 打开。" +
     "如果确实是从 WebUI 进来的，检查 pages/accounts/index.html 有没有加载 bridge-sdk.js。";
+  var NOT_EMBEDDED =
+    "这个页面是从浏览器标签直接打开的，请求送不回 AstrBot（bridge 靠 postMessage " +
+    "跟父窗口说话）。请在 AstrBot 的 WebUI 里打开这个插件页面。";
+
+  /* 一次请求最多等多久。
+   *
+   * AstrBot 的 bridge SDK（plugin_page_bridge.js）里**一个超时都没有**：
+   * 它把 promise 按 requestId 塞进 pendingRequests，只有收到父窗口的回应才
+   * 会落地。父窗口那边一旦没回（iframe 被重建、消息丢了、后端卡住），这个
+   * promise **永远不会落地** —— 页面上就是按钮一直灰着、"正在验证…"一直转，
+   * 既不报错也不结束。
+   *
+   * 所以这一层必须自己掐表。宁可给一句"等了 15 秒没回应"，也不要让人对着
+   * 一个转圈的界面猜发生了什么。
+   */
+  var TIMEOUT_MS = 15000;
+
+  /** 给 bridge 的 promise 掐表；超时了就把话说清楚，不装死。 */
+  function withTimeout(p, path) {
+    return new Promise(function (resolve, reject) {
+      var done = false;
+      var timer = setTimeout(function () {
+        if (done) { return; }
+        done = true;
+        var e = new Error(
+          "等了 " + (TIMEOUT_MS / 1000) + " 秒，AstrBot 没有回应（" + path + "）。\n"
+          + "去插件的 data/logs/xcpc.log 看有没有 web.req " + path + "：\n"
+          + "  有 → 请求到了，是后端没答完（注意 web.route_slow / web.route_fail）；\n"
+          + "  没有 → 请求根本没送到，问题在浏览器这一侧。");
+        e.timeout = true;
+        reject(e);
+      }, TIMEOUT_MS);
+      var settle = function (fn) {
+        return function (v) {
+          if (done) { return; }
+          done = true;
+          clearTimeout(timer);
+          fn(v);
+        };
+      };
+      Promise.resolve(p).then(settle(resolve), settle(reject));
+    });
+  }
 
   function call(path, method, body) {
     if (!bridge || typeof bridge.apiGet !== "function") {
       return Promise.reject(new Error(BRIDGE_MISSING));
     }
+    if (window.parent === window) {
+      // 没有父窗口 → postMessage 发给自己的 window，永远等不到回应
+      return Promise.reject(new Error(NOT_EMBEDDED));
+    }
     var p = (method === "POST") ? bridge.apiPost(path, body || {})
                                 : bridge.apiGet(path, body || undefined);
-    return Promise.resolve(p).then(function (data) {
+    return withTimeout(p, path).then(function (data) {
       if (data && data.error) {
         var err = new Error(data.error);
         // 标记出来，好让调用方把"还没关联"和"真出错了"分开说
@@ -342,7 +389,9 @@
           var c0 = el("div", "card");
           c0.appendChild(el("div", "msg",
             "先在上面「关联 QQ 号」输入绑定码 —— "
-            + "在 QQ 里发 /绑定 就能拿到。"));
+            + "在 QQ 里发 /绑定 就能拿到。\n"
+            + "关联成功之后，这里才会出现 Codeforces / AtCoder / QOJ / 洛谷 "
+            + "四个平台的填写框（绑在 QQ 号名下，所以得先知道你是谁）。"));
           box.appendChild(c0);
           var sub0 = document.querySelector(".sub");
           if (sub0) { sub0.textContent = "还没有关联 QQ 号。"; }

@@ -203,7 +203,7 @@ def test_specific_judgments():
                            user_id="qq1002")
         b = [i for i in r4.items if i.name == "账号绑定"][0]
         check("没绑 handle 判 WARN（不是错误）", b.status == scm.WARN, b.status)
-        check("指引到 /绑定", "/绑定" in b.fix, b.fix)
+        check("指引到 /xcpc 绑定", "/xcpc 绑定" in b.fix, b.fix)
 
         # 题库为空 → WARN 并说明后果
         p = [i for i in r4.items if i.name == "题库标注"][0]

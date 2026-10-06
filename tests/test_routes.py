@@ -148,6 +148,21 @@ def install_stub():
             return deco
         regex = command
 
+        def command_group(self, group_name, *a, **kw):
+            """`@filter.command_group("xcpc")` 这个装饰器执行完，函数名会被绑到
+            一个带 `.command` 的组对象上（AstrBot 里是 RegisteringCommandable），
+            子指令再挂 `@xcpc.command`。这里照这个形状做。"""
+            class _Group:
+                def command(self, *a, **kw):
+                    def deco(fn):
+                        return fn
+                    return deco
+                regex = command
+
+            def deco(fn):
+                return _Group()
+            return deco
+
     class Star:
         def __init__(self, context=None):
             self.context = context
@@ -449,6 +464,92 @@ def test_fake_matches_real():
     asyncio.run(main_())
 
 
+# ---------------------------------------------------------------------------
+# 5. 网页路由外面那层包装
+#
+# 为什么要包：AstrBot 的插件页面 bridge **一个超时都没有**
+# （plugin_page_bridge.js:58 `pendingRequests.set(...)`，
+# 只在收到父窗口回应时才落地）—— 后端一旦把异常漏出去，
+# 请求就永远不回来，页面上是按钮灰着、"正在验证…"转到天荒地老，
+# 既不报错也不结束。用户看到的"输入绑定码之后卡死"就是这个形状。
+#
+# 所以每条路由外面都包一层：异常变成一句人话，并且**在日志里留下痕迹** ——
+# 有了 `web.req`，"请求到底有没有到后端"才有得查。
+# ---------------------------------------------------------------------------
+
+def test_traced_route():
+    print("\n[5] 网页路由的包装（异常不许静默消失）")
+
+    async def main_():
+        tmp = tempfile.mkdtemp(prefix="xcpc_route5_")
+        p = await make_plugin(tmp)
+
+        # ① 关键字参数要原样转交 ——
+        # AstrBot 把路由里 `<session_id>` 匹配到的值当**关键字参数**传进来
+        # （dashboard/api/plugins.py：`view_handler(**path_values)`）。
+        seen = {}
+
+        async def handler(**kw):
+            seen.update(kw)
+            return {"ok": True}
+
+        wrapped = p._traced_route(
+            "/astrbot_plugin_xcpc/accounts/x/<sid>", handler)
+        r = await wrapped(sid="abc")
+        check("包装之后关键字参数照旧转交下去", seen == {"sid": "abc"}, repr(seen))
+        check("正常路径的返回值原样透出", r == {"ok": True}, repr(r))
+
+        # ② 带 `<session_id>` 的两条真路由，签名必须收得住。
+        #    原来写的是 `async def account_events(self)`，AstrBot 一调就是
+        #    TypeError —— 前端恰好没调这两条，所以一直没人发现。
+        for name in ("account_events", "account_cancel"):
+            sig = inspect.signature(getattr(p, name))
+            check("%s 收 session_id（AstrBot 当关键字参数传）" % name,
+                  "session_id" in sig.parameters, str(sig))
+        got = await p._traced_route(
+            "/astrbot_plugin_xcpc/accounts/login/<session_id>/events",
+            p.account_events)(session_id="s1")
+        check("带 session_id 直接调不会 TypeError", isinstance(got, dict),
+              repr(got))
+
+        # ③ handler 炸了：不许把异常扔给前端（前端没有超时，会一直转）
+        async def boom(**kw):
+            raise ValueError("炸了")
+
+        r = await p._traced_route("/astrbot_plugin_xcpc/accounts/boom", boom)()
+        check("异常变成 ok=False，而不是抛出去", r.get("ok") is False, repr(r))
+        check("错误里带了异常类型和原文（不然没法查）",
+              "ValueError" in r.get("error", "") and "炸了" in r.get("error", ""),
+              repr(r.get("error")))
+
+        # ④ 日志必须留痕。用户说"卡死"时，就靠这个分清
+        #    "请求根本没送到"和"送到了但没答完"。
+        lines = "\n".join(p.log.tail(50))
+        check("请求进来就记 web.req", "web.req" in lines, lines[-300:])
+        check("炸了就记 web.route_fail", "web.route_fail" in lines, lines[-300:])
+
+        # ⑤ 轮询接口（`/events`）不该刷屏
+        before = len(p.log.tail(200))
+        await p._traced_route(
+            "/astrbot_plugin_xcpc/accounts/login/<session_id>/events",
+            handler)(sid="s9")
+        check("轮询接口不记 web.req（否则日志全被它刷掉）",
+              len(p.log.tail(200)) == before,
+              "多了 %d 行" % (len(p.log.tail(200)) - before))
+
+        # ⑥ 路由归属的记号：terminate 靠它摘路由。
+        #    包成闭包之后 `__self__` 就没了，少了这个记号，
+        #    热重载会把旧实例的闭包一直留在路由表上。
+        check("包装后的 handler 带着实例记号",
+              getattr(wrapped, "_xcpc_owner", None) is p)
+        check("__name__ 也带上了（出问题时的日志才看得懂）",
+              wrapped.__name__ == "handler", wrapped.__name__)
+
+        await p.terminate()
+
+    asyncio.run(main_())
+
+
 def main() -> int:
     print("=" * 62)
     print("Web 路由测试")
@@ -459,6 +560,7 @@ def main() -> int:
     test_link_survives_without_token()
     test_other_routes()
     test_fake_matches_real()
+    test_traced_route()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

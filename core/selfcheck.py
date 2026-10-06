@@ -5,7 +5,7 @@
 为什么值得单独做
 ----------------
 用户装完插件第一件事是"试试能不能用"。如果没有自检，他要逐个试：
-`/同步` 失败是网络问题还是没绑定？`/方案` 失败是没模型还是没数据？
+`/xcpc 同步` 失败是网络问题还是没绑定？`/xcpc 方案` 失败是没模型还是没数据？
 页面打不开是版本不对还是路由没注册？—— 每个都要猜。
 
 自检把这些**一次性检查完并给出可操作的下一步**。
@@ -153,10 +153,10 @@ async def run(*, store=None, db=None, recorder=None, context=None,
     # ---- 2. 数据库 ----------------------------------------------------
     if db is None:
         r.add("数据库", BAD, "没打开",
-              "看 /日志 30；多半是 data_root 不可写或库文件损坏")
+              "看 /xcpc 日志 30；多半是 data_root 不可写或库文件损坏")
     elif db._conn is None:
         r.add("数据库", BAD, "连接是空的",
-              "看 /日志 30 里 db.open 那条，那里有具体原因")
+              "看 /xcpc 日志 30 里 db.open 那条，那里有具体原因")
     else:
         try:
             row = await db.query_one("SELECT COUNT(*) AS n FROM users")
@@ -174,7 +174,7 @@ async def run(*, store=None, db=None, recorder=None, context=None,
     else:
         r.add("日志", OK, recorder.log_path)
 
-    # ---- 4. 模型（这一项决定 /方案 能不能用）---------------------------
+    # ---- 4. 模型（这一项决定 /xcpc 方案 能不能用）---------------------------
     if context is None:
         r.add("模型", WARN, "没传 context（脱离 AstrBot 跑的）")
     else:
@@ -194,7 +194,7 @@ async def run(*, store=None, db=None, recorder=None, context=None,
                   "在 AstrBot 里配一个对话模型；或在插件配置里填 llm_provider_id")
         if not hasattr(context, "llm_generate"):
             r.add("llm_generate", BAD, "这个 AstrBot 版本没有它",
-                  "需要 AstrBot >= 4.5.7；低于这个版本 /方案 用不了")
+                  "需要 AstrBot >= 4.5.7；低于这个版本 /xcpc 方案 用不了")
 
     # ---- 5. Web 路由（决定绑定页能不能用）-----------------------------
     if routes_probe is None and context is not None:
@@ -228,18 +228,18 @@ async def run(*, store=None, db=None, recorder=None, context=None,
                       "、".join("%s=%s" % (p, handles[p]) for p in bound))
             else:
                 r.add("账号绑定", WARN, "一个平台都没绑",
-                      "先 /绑定 拿绑定码，在网页上关联，然后填 handle")
+                      "先 /xcpc 绑定 拿绑定码，在网页上关联，然后填 handle")
             subs = await store.count_submissions(user_id)
             if subs:
                 r.add("已同步数据", OK, "%d 条提交" % subs)
             else:
-                r.add("已同步数据", WARN, "还没有数据", "绑好 handle 后发 /同步")
+                r.add("已同步数据", WARN, "还没有数据", "绑好 handle 后发 /xcpc 同步")
             states = await store.all_sync_states(user_id)
             errs = [p for p, st in states.items() if st.get("error_kind")]
             if errs:
                 r.add("同步健康", WARN,
                       "这些平台上次同步失败：%s" % "、".join(errs),
-                      "看 /日志 30 里的失败分类；凭据失效就去重新绑定")
+                      "看 /xcpc 日志 30 里的失败分类；凭据失效就去重新绑定")
         except Exception as exc:
             r.add("账号绑定", BAD, "读取失败：%s" % exc)
     elif store is not None:

@@ -371,7 +371,7 @@ def test_link_code():
         # 错误原因要能区分
         _, msg = await s.claim_link_code("ZZZZZZ")
         check("不存在的码给出可操作的说明",
-              "不存在" in str(msg) and "/绑定" in str(msg), repr(msg))
+              "不存在" in str(msg) and "/xcpc 绑定" in str(msg), repr(msg))
         _, msg2 = await s.claim_link_code("")
         check("空码给出说明", bool(msg2), repr(msg2))
 

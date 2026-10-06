@@ -281,7 +281,7 @@ class Store:
         return {r["problem_key"] for r in rows}
 
     async def platform_stats(self, user_id: str) -> list[dict]:
-        """每个平台的提交数 / AC 数 / 最近一次提交时间。给 /状态 用。"""
+        """每个平台的提交数 / AC 数 / 最近一次提交时间。给 /xcpc 状态 用。"""
         user_id = _require_user(user_id)
         rows = await self.db.query(
             "SELECT platform, COUNT(*) AS total, "
@@ -503,12 +503,12 @@ class Store:
             return None, "没填绑定码"
         row = await self.db.query_one("SELECT * FROM link_codes WHERE code=?", (code,))
         if not row:
-            return None, "这个绑定码不存在 —— 在 QQ 里发 /绑定 拿一个新的"
+            return None, "这个绑定码不存在 —— 在 QQ 里发 /xcpc 绑定 拿一个新的"
         if row["used_at"]:
-            return None, "这个绑定码已经用过了 —— 在 QQ 里发 /绑定 拿一个新的"
+            return None, "这个绑定码已经用过了 —— 在 QQ 里发 /xcpc 绑定 拿一个新的"
         now = int(time.time())
         if int(row["expires_at"]) < now:
-            return None, "绑定码过期了（10 分钟内有效）—— 在 QQ 里发 /绑定 重新拿"
+            return None, "绑定码过期了（10 分钟内有效）—— 在 QQ 里发 /xcpc 绑定 重新拿"
 
         user_id = row["user_id"]
         token = secrets.token_urlsafe(32)

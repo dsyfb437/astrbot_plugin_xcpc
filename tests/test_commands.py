@@ -15,7 +15,7 @@
 这些都不会被逻辑测试覆盖到。而 `main.py` 依赖 astrbot 包，
 所以这里塞一个最小外壳，把命令真的驱动一遍。
 
-**全程不联网**：需要网络的命令（/同步 /方案）在没有 handle / 没有数据时
+**全程不联网**：需要网络的命令（/xcpc 同步 /xcpc 方案）在没有 handle / 没有数据时
 会在发请求之前就返回，正好也验证了"该早退的时候真的早退了"。
 
 跑法：python tests/test_commands.py
@@ -74,12 +74,53 @@ def install_stub():
         pass
 
     class _Filter:
+        def __init__(self):
+            #: 注册过的**完整指令名**（子指令带组名前缀），用来断言"没有裸指令"
+            self.commands = []
+            #: 注册过的指令组名
+            self.groups = []
+
         def command(self, *a, **kw):
+            name = a[0] if a else kw.get("command_name", "")
+            alias = kw.get("alias") or set()
+            self.commands.extend([name] + list(alias))
+
             def deco(fn):
                 return fn
             return deco
-        regex = command
+
+        def regex(self, *a, **kw):
+            # 正则过滤器，**不是**指令名，别往 commands 里记
+            def deco(fn):
+                return fn
+            return deco
         permission_type = lambda self, *a, **kw: (lambda fn: fn)  # noqa: E731
+
+        def command_group(self, group_name, *a, **kw):
+            """`@filter.command_group("xcpc")` —— 真的 AstrBot 返回的是
+            一个 `RegisteringCommandable`，`@filter.command_group(...)` 这个
+            装饰器执行完，函数名就被绑到那个对象上了，子指令再挂 `@xcpc.command`。
+            这里照着这个形状做：装饰器返回一个带 `.command` 的组对象。
+            子指令的完整名是 `组名 子名`（AstrBot::CommandFilter 就是这么拼的）。
+            """
+            outer = self
+            outer.groups.append(group_name)
+
+            class _Group:
+                def command(self, *a, **kw):
+                    name = a[0] if a else kw.get("command_name", "")
+                    alias = kw.get("alias") or set()
+                    outer.commands.extend(
+                        ["%s %s" % (group_name, n) for n in [name] + list(alias)])
+
+                    def deco(fn):
+                        return fn
+                    return deco
+                regex = staticmethod(lambda *a, **kw: (lambda fn: fn))
+
+            def deco(fn):
+                return _Group()
+            return deco
 
     class Star:
         def __init__(self, context=None):
@@ -216,6 +257,19 @@ def test_init():
                      "/astrbot_plugin_xcpc/accounts/credentials"):
             check("路由 %s" % want.split("/")[-1], want in routes, repr(routes))
 
+        # 指令全挂在 xcpc 组下面 —— 一个裸名都不能有。
+        # 假的 `filter` 会记下每个注册过的完整名，正好用来验这件事。
+        check("注册了一个指令组", set(mod.filter.groups) == {mod.GROUP_NAME},
+              repr(mod.filter.groups))
+        full = sorted(set(mod.filter.commands))
+        check("注册了不止一个子指令", len(full) >= 20, "实际 %d" % len(full))
+        bare = [n for n in full if not n.startswith(mod.GROUP_NAME + " ")]
+        check("没有裸指令（全带 xcpc 前缀）", not bare, "裸的：%s" % bare[:6])
+        for want in ("同步", "绑定", "帮助", "方案", "自检", "打卡"):
+            check("子指令 xcpc %s" % want,
+                  "%s %s" % (mod.GROUP_NAME, want) in full,
+                  "没注册：%s" % want)
+
         await p.terminate()
         check("terminate 把路由摘干净了",
               not [r for r in p.context.registered_web_apis
@@ -236,12 +290,12 @@ def test_commands():
         tmp = tempfile.mkdtemp(prefix="xcpc_cmd2_")
         p, mod = await make_plugin(tmp)
 
-        # /帮助
+        # /xcpc 帮助
         for msg, must in (
-            ("/帮助", ["XCPC 备赛助手", "同步", "方案", "自检"]),
-            ("/帮助 同步", ["QOJ", "登录", "洛谷"]),
-            ("/帮助 绑定", ["绑定码"]),
-            ("/帮助 日志", ["日志"]),
+            ("/xcpc 帮助", ["XCPC 备赛助手", "同步", "方案", "自检"]),
+            ("/xcpc 帮助 同步", ["QOJ", "登录", "洛谷"]),
+            ("/xcpc 帮助 绑定", ["绑定码"]),
+            ("/xcpc 帮助 日志", ["日志"]),
         ):
             ev = await drive(p, "cmd_help", msg)
             body = ev.text
@@ -249,18 +303,18 @@ def test_commands():
             check("%s 有输出且含关键内容" % msg, body and not missing,
                   "缺 %s；实际前 150 字：%s" % (missing, body[:150]))
 
-        # /自检 —— 这是装完第一件事
-        ev = await drive(p, "cmd_selfcheck", "/自检")
-        check("/自检 有输出", bool(ev.text), ev.text[:120])
-        check("/自检 给出了结论", "自检" in ev.text and "合计" in ev.text,
+        # /xcpc 自检 —— 这是装完第一件事
+        ev = await drive(p, "cmd_selfcheck", "/xcpc 自检")
+        check("/xcpc 自检 有输出", bool(ev.text), ev.text[:120])
+        check("/xcpc 自检 给出了结论", "自检" in ev.text and "合计" in ev.text,
               ev.text[:150])
-        check("/自检 指出了还没绑账号", "账号绑定" in ev.text, ev.text[:400])
-        check("/自检 给了怎么修", "→" in ev.text, ev.text[:400])
+        check("/xcpc 自检 指出了还没绑账号", "账号绑定" in ev.text, ev.text[:400])
+        check("/xcpc 自检 给了怎么修", "→" in ev.text, ev.text[:400])
 
-        # /绑定 —— 生成绑定码
-        ev = await drive(p, "cmd_bind", "/绑定")
-        check("/绑定 有输出", bool(ev.text))
-        check("/绑定 给了 6 位码", "绑定码" in ev.text, ev.text[:150])
+        # /xcpc 绑定 —— 生成绑定码
+        ev = await drive(p, "cmd_bind", "/xcpc 绑定")
+        check("/xcpc 绑定 有输出", bool(ev.text))
+        check("/xcpc 绑定 给了 6 位码", "绑定码" in ev.text, ev.text[:150])
         import re
         m = re.search(r"绑定码：([A-Z2-9]{6})", ev.text)
         check("码的格式对（6 位，去了易混字符）", bool(m),
@@ -271,60 +325,60 @@ def test_commands():
             check("生成的码真能用", bool(uid[0]) and uid[1] == "qq1001",
                   repr(uid)[:100])
 
-        # /我的状态
-        ev = await drive(p, "cmd_mydata", "/我的状态")
-        check("/我的状态 有输出", bool(ev.text))
+        # /xcpc 我的状态
+        ev = await drive(p, "cmd_mydata", "/xcpc 我的状态")
+        check("/xcpc 我的状态 有输出", bool(ev.text))
         check("含四个平台", all(x in ev.text for x in
                                 ("CF", "AtCoder", "QOJ", "洛谷")), ev.text[:200])
         check("没数据时明说「还没有数据」+ 下一步",
-              "还没有数据" in ev.text and "/绑定" in ev.text, ev.text[:250])
+              "还没有数据" in ev.text and "/xcpc 绑定" in ev.text, ev.text[:250])
 
-        # /比赛
-        ev = await drive(p, "cmd_contests", "/比赛")
-        check("/比赛 有输出", bool(ev.text))
+        # /xcpc 比赛
+        ev = await drive(p, "cmd_contests", "/xcpc 比赛")
+        check("/xcpc 比赛 有输出", bool(ev.text))
         check("没比赛时说清三个平台各自的情况",
               "CF" in ev.text and "AtCoder" in ev.text and "QOJ" in ev.text,
               ev.text[:250])
 
-        # /日志
-        ev = await drive(p, "cmd_log", "/日志 5")
-        check("/日志 有输出", bool(ev.text))
+        # /xcpc 日志
+        ev = await drive(p, "cmd_log", "/xcpc 日志 5")
+        check("/xcpc 日志 有输出", bool(ev.text))
         check("提示已打码", "打码" in ev.text, ev.text[:120])
 
-        # /反馈
-        ev = await drive(p, "cmd_feedback", "/反馈 今天有点累")
-        check("/反馈 记下了", "记下了" in ev.text, ev.text[:120])
+        # /xcpc 反馈
+        ev = await drive(p, "cmd_feedback", "/xcpc 反馈 今天有点累")
+        check("/xcpc 反馈 记下了", "记下了" in ev.text, ev.text[:120])
         rows = await p.store.list_feedback("qq1001")
         check("反馈真进库了", len(rows) == 1 and "累" in rows[0]["text"],
               repr(rows)[:120])
         # 空反馈要给用法
-        ev = await drive(p, "cmd_feedback", "/反馈")
-        check("空 /反馈 给用法", "例" in ev.text or "一句话" in ev.text,
+        ev = await drive(p, "cmd_feedback", "/xcpc 反馈")
+        check("空 /xcpc 反馈 给用法", "例" in ev.text or "一句话" in ev.text,
               ev.text[:120])
 
-        # /同步 —— 没绑 handle，应该**在发请求之前**就返回
-        ev = await drive(p, "cmd_sync", "/同步")
-        check("/同步 有输出", bool(ev.text))
+        # /xcpc 同步 —— 没绑 handle，应该**在发请求之前**就返回
+        ev = await drive(p, "cmd_sync", "/xcpc 同步")
+        check("/xcpc 同步 有输出", bool(ev.text))
         check("没绑 handle 时明确说清", "绑定" in ev.text or "bind" in ev.text.lower(),
               ev.text[:300])
         check("没有假装同步成功", "✓" not in ev.text, ev.text[:300])
 
-        # /方案 —— 没数据，应该**在调模型之前**就返回
-        ev = await drive(p, "cmd_plan", "/方案")
-        check("/方案 有输出", bool(ev.text))
+        # /xcpc 方案 —— 没数据，应该**在调模型之前**就返回
+        ev = await drive(p, "cmd_plan", "/xcpc 方案")
+        check("/xcpc 方案 有输出", bool(ev.text))
         check("没数据时明确说清，且不调模型",
-              "还没有数据" in ev.text and "/同步" in ev.text, ev.text[:300])
+              "还没有数据" in ev.text and "/xcpc 同步" in ev.text, ev.text[:300])
         check("说明里点出「不是水平是零」", "不是" in ev.text, ev.text[:350])
 
-        # /总结 —— 没数据也要能跑
-        ev = await drive(p, "cmd_summary", "/总结")
-        check("/总结 有输出", bool(ev.text), ev.text[:150])
+        # /xcpc 总结 —— 没数据也要能跑
+        ev = await drive(p, "cmd_summary", "/xcpc 总结")
+        check("/xcpc 总结 有输出", bool(ev.text), ev.text[:150])
         check("明说「没有数据」不等于「水平是零」",
               "没有数据" in ev.text, ev.text[:300])
 
         # 打卡：循环第 ⑤ 环的入口
-        ev = await drive(p, "cmd_done", "/打卡 今天做完了两道")
-        check("/打卡 有输出", bool(ev.text))
+        ev = await drive(p, "cmd_done", "/xcpc 打卡 今天做完了两道")
+        check("/xcpc 打卡 有输出", bool(ev.text))
         check("明说记下了", "做完了" in ev.text, ev.text[:120])
         check("带备注", "两道" in ev.text or "做完了" in ev.text, ev.text[:150])
         rows = await p.store.task_log("qq1001")
@@ -333,21 +387,21 @@ def test_commands():
         check("备注也存了", "两道" in (rows[0]["note"] or ""), repr(rows[0]["note"]))
         check("说出了会拿去做参考", "算进去" in ev.text, ev.text[:150])
 
-        ev = await drive(p, "cmd_partial", "/做了一半")
-        check("/做了一半 记下了", "一半" in ev.text, ev.text[:120])
+        ev = await drive(p, "cmd_partial", "/xcpc 做了一半")
+        check("/xcpc 做了一半 记下了", "一半" in ev.text, ev.text[:120])
 
         # 连着没做 → 该提醒"改计划"而不是催人
         for d in ("2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01"):
             await p.store.log_task("qq1001", "skipped", date=d)
-        ev = await drive(p, "cmd_skip", "/没做 今天太忙")
-        check("/没做 记下了", "没做" in ev.text, ev.text[:120])
+        ev = await drive(p, "cmd_skip", "/xcpc 没做 今天太忙")
+        check("/xcpc 没做 记下了", "没做" in ev.text, ev.text[:120])
         check("连着没做时提醒去改计划（不是催人）",
               "量太多" in ev.text or "压小" in ev.text, ev.text[:250])
         check("说清了「连着做不完的计划等于没有计划」",
               "没有计划" in ev.text, ev.text[:300])
         check("显示了执行率", "%" in ev.text, ev.text[:200])
 
-        # /题库 —— **把 syncer 换成假的**，否则这个测试会去联网。
+        # /xcpc 题库 —— **把 syncer 换成假的**，否则这个测试会去联网。
         # （离线测试绝不联网是我给自己定的规矩，破了的话测试就不可信了。）
         real_syncer = p.syncer
 
@@ -362,20 +416,20 @@ def test_commands():
 
         # ① 成功路径
         p.syncer = FakeSyncer(True, "ok", 11425)
-        ev = await drive(p, "cmd_bank", "/题库")
-        check("/题库 有输出", bool(ev.text))
+        ev = await drive(p, "cmd_bank", "/xcpc 题库")
+        check("/xcpc 题库 有输出", bool(ev.text))
         check("报了新增题数", "11425" in ev.text, ev.text[:200])
         check("说明它有什么用", "回避" in ev.text, ev.text[:250])
         check("默认拉 CF", p.syncer.called == ["codeforces"], repr(p.syncer.called))
 
         # ② 指定平台
         p.syncer = FakeSyncer(True, "ok", 9673)
-        await drive(p, "cmd_bank", "/题库 atcoder")
+        await drive(p, "cmd_bank", "/xcpc 题库 atcoder")
         check("能指定平台", p.syncer.called == ["atcoder"], repr(p.syncer.called))
 
         # ③ 失败路径 —— **不能假装成功**
         p.syncer = FakeSyncer(False, "网络不可达：连不上", 0)
-        ev = await drive(p, "cmd_bank", "/题库")
+        ev = await drive(p, "cmd_bank", "/xcpc 题库")
         check("失败时明确说失败", "失败" in ev.text, ev.text[:200])
         check("说明后果（没题库就没法判回避）",
               "回避" in ev.text or "用不了" in ev.text, ev.text[:250])
@@ -384,8 +438,8 @@ def test_commands():
         p.syncer = real_syncer
 
         # 原有命令还在
-        for name, msg in (("cmd_status", "/状态"), ("cmd_today", "/今天"),
-                          ("cmd_lists", "/题单"), ("cmd_format", "/格式")):
+        for name, msg in (("cmd_status", "/xcpc 状态"), ("cmd_today", "/xcpc 今天"),
+                          ("cmd_lists", "/xcpc 题单"), ("cmd_format", "/xcpc 格式")):
             try:
                 ev = await drive(p, name, msg)
                 check("%s 还能调通" % msg, True)
@@ -409,8 +463,8 @@ def test_no_user_id():
         tmp = tempfile.mkdtemp(prefix="xcpc_cmd3_")
         p, mod = await make_plugin(tmp)
 
-        for name, msg in (("cmd_sync", "/同步"), ("cmd_plan", "/方案"),
-                          ("cmd_mydata", "/我的状态"), ("cmd_bind", "/绑定")):
+        for name, msg in (("cmd_sync", "/xcpc 同步"), ("cmd_plan", "/xcpc 方案"),
+                          ("cmd_mydata", "/xcpc 我的状态"), ("cmd_bind", "/xcpc 绑定")):
             ev = await drive(p, name, msg, sender="")
             check("%s 空 user_id 时有输出" % msg, bool(ev.text),
                   "居然什么都没说")
@@ -434,9 +488,9 @@ def test_no_crash():
         tmp = tempfile.mkdtemp(prefix="xcpc_cmd4_")
         p, mod = await make_plugin(tmp)
 
-        weird = ["", "   ", "/同步 " + "x" * 500, "/方案 \n\n换行",
-                 "/日志 abc", "/日志 -5", "/日志 99999",
-                 "/帮助 " + "y" * 200, "/反馈 ", "/反馈 " + "z" * 5000]
+        weird = ["", "   ", "/xcpc 同步 " + "x" * 500, "/xcpc 方案 \n\n换行",
+                 "/xcpc 日志 abc", "/xcpc 日志 -5", "/xcpc 日志 99999",
+                 "/xcpc 帮助 " + "y" * 200, "/xcpc 反馈 ", "/xcpc 反馈 " + "z" * 5000]
         cmds = ["cmd_sync", "cmd_plan", "cmd_log", "cmd_help", "cmd_feedback",
                 "cmd_summary", "cmd_contests", "cmd_mydata", "cmd_selfcheck",
                 "cmd_bind"]

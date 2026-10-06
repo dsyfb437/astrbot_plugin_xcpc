@@ -153,7 +153,7 @@ def test_recorder() -> None:
 # ---------------------------------------------------------------------------
 
 def test_tail() -> None:
-    print("\n[4] /日志 的读取与隔离")
+    print("\n[4] /xcpc 日志 的读取与隔离")
     tmp = tempfile.mkdtemp(prefix="xcpc_log2_")
     rec = logm.Recorder(os.path.join(tmp, "x.log"), to_astrbot=False)
     rec.open()

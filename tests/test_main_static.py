@@ -4,7 +4,7 @@
 
 都是我自己踩过的：
   1. **重复定义的函数/命令** —— Python 里后定义的**静默覆盖**先定义的。
-     我加新版 /帮助 时写在旧版前面，结果生效的是旧版，而且不报任何错。
+     我加新版 /xcpc 帮助 时写在旧版前面，结果生效的是旧版，而且不报任何错。
      （同一个坑在 JS 里也踩过：重复的 `function call()`。）
   2. **注册了命令却忘了实现** —— 或者反过来。
   3. **数据访问没带 user_id**。
@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import ast
 import io
 import os
 import re
@@ -108,7 +109,7 @@ def test_no_duplicate_defs() -> None:
     # 注册的命令名也不能重复
     cmds: dict[str, int] = {}
     for i, line in enumerate(code.split("\n"), 1):
-        m = re.search(r'@filter\.command\(\s*"([^"]+)"', line)
+        m = re.search(r'@xcpc\.command\(\s*"([^"]+)"', line)
         if m:
             cmds[m.group(1)] = cmds.get(m.group(1), 0) + 1
     dup_cmds = {k: v for k, v in cmds.items() if v > 1}
@@ -118,7 +119,7 @@ def test_no_duplicate_defs() -> None:
     aliases: dict[str, str] = {}
     clash = []
     for line in code.split("\n"):
-        m = re.search(r'@filter\.command\(\s*"([^"]+)"\s*,\s*alias=\{([^}]*)\}', line)
+        m = re.search(r'@xcpc\.command\(\s*"([^"]+)"\s*,\s*alias=\{([^}]*)\}', line)
         if not m:
             continue
         cmd = m.group(1)
@@ -127,6 +128,18 @@ def test_no_duplicate_defs() -> None:
                 clash.append("%s 是 %s 的别名，但也是一个命令名" % (a, cmd))
             aliases[a] = cmd
     check("别名不和命令名冲突", not clash, "；".join(clash))
+
+    # 指令组得真的注册过，而且**一个裸指令都不能剩**。
+    # 裸指令的风险是实打实的：AstrBot 里同名指令所有插件一起接，
+    # 装个别的插件也叫 /状态，两边都会回一条，用户分不清谁发的。
+    check("注册了 xcpc 指令组",
+          bool(re.search(r"@filter\.command_group\(\s*GROUP_NAME\s*\)", code)),
+          "没找到 @filter.command_group(GROUP_NAME)")
+    bare = re.findall(r'@filter\.command\(\s*"([^"]+)"', code)
+    check("没有裸指令（全部挂进 /xcpc）", not bare, "这几个还是裸的：%s" % bare[:5])
+    check("子指令用的是 @xcpc.command",
+          code.count("@xcpc.command(") >= 20,
+          "只找到 %d 个" % code.count("@xcpc.command("))
 
 
 # ---------------------------------------------------------------------------
@@ -141,20 +154,20 @@ def test_commands_implemented() -> None:
     lines = code.split("\n")
     missing = []
     for i, line in enumerate(lines):
-        if "@filter.command(" not in line:
+        if "@xcpc.command(" not in line:
             continue
         # 往下找第一个 def
         for j in range(i + 1, min(i + 6, len(lines))):
             if re.match(r"^\s+(?:async\s+)?def ", lines[j]):
                 break
         else:
-            missing.append("第 %d 行的 @filter.command 后面没有 def" % (i + 1))
-    check("每个 @filter.command 都有对应方法", not missing, "；".join(missing))
+            missing.append("第 %d 行的 @xcpc.command 后面没有 def" % (i + 1))
+    check("每个 @xcpc.command 都有对应方法", not missing, "；".join(missing))
 
     # 我们承诺过的命令必须都在
     for want in ("同步", "绑定", "帮助", "比赛", "日志"):
-        check("有 /%s 命令" % want,
-              bool(re.search(r'@filter\.command\(\s*"%s"' % re.escape(want), code)))
+        check("有 /xcpc %s 命令" % want,
+              bool(re.search(r'@xcpc\.command\(\s*"%s"' % re.escape(want), code)))
 
 
 # ---------------------------------------------------------------------------
@@ -175,8 +188,53 @@ def test_help_mentions_limits() -> None:
     for kind in ("凭据失效", "限流", "挑战未过"):
         check("帮助解释了失败分类「%s」" % kind, kind in src)
 
-    # /帮助 要能分主题
-    check("帮助支持分主题（/帮助 同步）", "帮助 同步" in src or "topic" in src)
+    # /xcpc 帮助 要能分主题
+    check("帮助支持分主题（/xcpc 帮助 同步）", "帮助 同步" in src or "topic" in src)
+
+
+# ---------------------------------------------------------------------------
+# 3b. 文案里的指令名都带 /xcpc 前缀
+# ---------------------------------------------------------------------------
+
+def test_command_prefix_in_text() -> None:
+    """提示文案里写的指令，必须和真正注册的指令对得上。
+
+    改指令组名或者加子指令的时候，最容易漏掉的就是散落在各处的提示语 ——
+    用户照着 `/绑定` 去发，实际上要发 `/xcpc 绑定`，然后他会以为插件坏了。
+    这里把**字符串字面量**扒出来扫一遍（注释不算：注释里出现裸指令名常常
+    是在讲"为什么不能用裸指令名"，那是有意为之）。
+    """
+    print("\n[3b] 提示文案里的指令前缀")
+    names = set(re.findall(r'@xcpc\.command\(\s*"([^"]+)"', load()))
+    check("从 main.py 里读到了子指令名", len(names) >= 20, "只读到 %d 个" % len(names))
+
+    # 只看中文名：英文别名（status / log / list…）和路由路径撞脸，
+    # 扫它们会全是假阳性。
+    cn = sorted(n for n in names if not n.isascii())
+    pat = re.compile(r"/(?:%s)(?![一-龥A-Za-z0-9_])"
+                     % "|".join(re.escape(n) for n in sorted(cn, key=len, reverse=True)))
+
+    targets = ["main.py", "xcpc_core.py"]
+    for sub in ("core", "platforms"):
+        targets += sorted(
+            os.path.join(sub, f) for f in os.listdir(os.path.join(PLUGIN, sub))
+            if f.endswith(".py"))
+
+    bad = []
+    for rel in targets:
+        path = os.path.join(PLUGIN, rel)
+        try:
+            tree = ast.parse(io.open(path, encoding="utf-8").read())
+        except (OSError, SyntaxError) as exc:
+            bad.append("%s 读不了：%s" % (rel, exc))
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                m = pat.search(node.value)
+                if m:
+                    bad.append("%s:%d 出现裸指令 %s" % (rel, node.lineno, m.group(0)))
+    check("文案里没有裸指令（都写成 /xcpc 子指令）", not bad,
+          "；".join(bad[:5]))
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +362,7 @@ def test_uid_is_sender_id() -> None:
     用它当身份意味着同一个群里所有人共用一个身份，
     绑的账号全部串在一起 —— 这是"会绑错人"那类错误里最严重的一种。
 
-    这个 bug 是命令接线测试抓出来的（sender 为空时 /绑定 照样生成码）。
+    这个 bug 是命令接线测试抓出来的（sender 为空时 /xcpc 绑定 照样生成码）。
     这里做成静态检查，防止再犯。
     """
     print("\n[6] 身份只能来自 get_sender_id")
@@ -496,7 +554,7 @@ def test_api_contract() -> None:
 
     # ③ filter.command 的 alias 必须是 **set** 字面量
     bad_alias = []
-    for m2 in re.finditer(r"@filter\.command\(([^)]*)\)", code):
+    for m2 in re.finditer(r"@xcpc\.command\(([^)]*)\)", code):
         args = m2.group(1)
         am = re.search(r"alias\s*=\s*(\S+)", args)
         if am and not am.group(1).startswith("{"):
@@ -509,23 +567,33 @@ def test_api_contract() -> None:
     # 第一版要求参数里出现字面量 "route"，但插件传的是
     # `prefix + path`（拼出来的表达式），于是假失败。
     # **检查器比代码更容易写错**，断言要尽量贴合真实形状。
-    m3 = re.search(r"register_web_api\(([^)]*)\)", code, re.S)
-    check("用了 register_web_api", m3 is not None)
-    if m3:
-        raw = m3.group(1).replace("\n", " ")
-        parts = [p.strip() for p in raw.split(",") if p.strip()]
+    #
+    # 第二版用正则 `\(([^)]*)\)` 数逗号 —— 又一次假失败：参数里嵌了
+    # 括号（`self._traced_route(prefix + path, handler)`），正则在第一个
+    # `)` 处截断，4 个参数被数成 3 个。
+    # **同一个断言栽在"写法变了"上两次了**，这次不数文本，直接看语法树：
+    # 括号嵌套、换行、注释都不再影响结果。
+    calls = [
+        n for n in ast.walk(ast.parse(code))
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "register_web_api"
+    ]
+    check("用了 register_web_api", bool(calls))
+    if calls:
+        args = calls[0].args
         check("register_web_api 传了 4 个参数（route/handler/methods/desc）",
-              len(parts) == 4, "实际 %d 个：%s" % (len(parts), parts))
+              len(args) == 4, "实际 %d 个" % len(args))
         check("第 1 个是路由表达式",
-              bool(parts) and any(k in parts[0] for k in
-                                  ("route", "prefix", "path")),
-              parts[0] if parts else "")
+              bool(args) and any(k in ast.unparse(args[0]) for k in
+                                 ("route", "prefix", "path")),
+              ast.unparse(args[0]) if args else "")
         # 第 3 个参数传变量名（`methods`）或字面量列表都合法 ——
         # 我上一版要求必须是 `[...]` 字面量，又一次假失败。
         # **检查器比代码更容易写错**：这已经是同一个测试里第二次了。
         check("第 3 个是方法列表（字面量或变量都行）",
-              len(parts) > 2 and bool(parts[2]),
-              parts[2] if len(parts) > 2 else "")
+              len(args) > 2 and bool(ast.unparse(args[2])),
+              ast.unparse(args[2]) if len(args) > 2 else "")
 
     # ⑤ 不该用我没核对过的 event 成员
     UNVERIFIED = ("get_group_id", "get_platform_name", "message_obj_raw",
@@ -541,6 +609,7 @@ def main() -> int:
     test_no_duplicate_defs()
     test_commands_implemented()
     test_help_mentions_limits()
+    test_command_prefix_in_text()
     test_data_access_uses_uid()
     test_encoding_guards()
     test_uid_is_sender_id()

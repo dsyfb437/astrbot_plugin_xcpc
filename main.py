@@ -32,7 +32,7 @@
 
 过题数 / AC 顺序 / 罚时（带算式，并标明是按几次算的）会被自动补上，
 「逐题记录」的题号也有了；手打的字段优先，不会被粘贴内容覆盖。
-不确定解析对不对就先发 ``/解析`` —— 那个只回报，不落盘。
+不确定解析对不对就先发 ``/xcpc 解析`` —— 那个只回报，不落盘。
 
 本文件只负责"接到 AstrBot 上"：指令注册、消息发送、定时任务。
 真正读写工作区/解析复盘的逻辑在 ``xcpc_core.py``（不依赖 astrbot，可单独自测）。
@@ -46,6 +46,7 @@ import asyncio
 import glob
 import os
 import re
+import time
 import traceback
 from datetime import timedelta
 
@@ -126,43 +127,118 @@ except ImportError:  # pragma: no cover - 只在非包方式加载时走到
 
 #: 触发"自动识别复盘文本"的正则。故意写得很保守 —— 只在出现**强标志**时才抢消息，
 #: 免得把正常聊天抢过来、让 LLM 答不了话。
-#: 命中后 main.py 里还会再检查一次"是不是以指令前缀开头"，避免和 /复盘 重复记录。
+#: 命中后 main.py 里还会再检查一次"是不是以指令前缀开头"，避免和 /xcpc 复盘 重复记录。
 REVIEW_TRIGGER_RE = (
     r"(?m)^\s*(?:复盘|vp\s*复盘|复盘记录|记录复盘)\s*$"
     r"|^\s*(?:比赛|过题|罚时|排名)\s*[:：=]"
 )
 
-HELP_TEXT = """XCPC 备赛助手 —— 能用的指令：
+#: 指令组的名字。所有指令都是它的子指令，调用形式 `/xcpc <子指令>`。
+#: 取这个名字是为了**不撞车**：裸的 `/状态` `/今天` 随便装个插件就能撞上，
+#: 撞上之后 AstrBot 会让两个插件都处理同一条消息。
+GROUP_NAME = "xcpc"
 
-/复盘 <内容>      记一场 VP / 比赛（也可以直接发一段带「比赛:」的话）
-/解析 <粘贴内容>  只解析榜单/提交记录给你看，不落盘 —— 先验一遍再 /复盘
-/随手记 <内容>    丢进 03-log/inbox.md 收件箱，回来再整理
-/今天             今天那组任务（读 00-plan/sprint.md）
-/状态             核心指标：rating / 已 AC / 连续天数 / 个人 KPI
-/题单             当前题单的前几道
-/刷新             重新抓 CF 数据并重跑诊断（只 file 后端可用）
-/订阅 /退订       开启或关闭每天晚上那条推送
-/推送测试         立刻推一条今天的汇报（不用等到推送时间）
-/格式             复盘该怎么写（含可复制的模板）
-/帮助             这条
+#: 帮助里显示的指令前缀。写成常量，改组名时不用满文件找。
+CMD = "/" + GROUP_NAME
 
-复盘内容按行写就行，例如：
+# 帮助文案放在模块层（不是塞在 `cmd_help` 里面），为的是能被测试直接读到 ——
+# 文案里写的命令必须真的存在，这件事得有个办法验证。
+# 之前这里躺着一份**没人引用**的 HELP_TEXT，写的还是老工作区那套 `/复盘 /今天`，
+# 和真正回给用户的内容对不上，纯属埋雷。
+HELP_SYNC = f"""{CMD} 同步 [平台]  —— 立即同步
 
-比赛: CF Round 1024
-类型: VP
-过题: 3
-罚时: 145
-想歪: 看到区间修改就反射性上线段树，其实是差分
-A 思路 想了一小时没往图论上想
-E 实现 独立想出 P1 边界写挂了
+  不带参数：同步所有已绑定的平台
+  带参数：  {CMD} 同步 cf    {CMD} 同步 atcoder    {CMD} 同步 qoj    {CMD} 同步 洛谷
 
-**QOJ 抓不到，但你可以直接粘**：打完 VP 把榜单或提交记录页面的内容
-整段复制，跟在 /复盘 后面发过来 —— 过题数、AC 顺序、罚时（带你算出来的
-算式）和逐题题号会自动补上，手打的字段优先、不会被覆盖。
-正文第一行单独写个 cf，罚时就按 Codeforces 规则（10 分钟/次）算。
+各平台的门槛（实测，不是猜的）：
+  CF       不需要登录，官方公开 API
+  AtCoder  不需要登录，但走的是**社区服务**不是官方
+           ⚠️ 它的 API 里**没有算法标签**，所以标签是空的
+  QOJ      **必须登录**。提交记录和榜单未登录时看不到
+  ⚠️ 洛谷   **必须登录**，而且自动登录还没打通，要手动导入 Cookie
 
-认不出来的句子会原样收进「想歪的地方」，一个字都不会丢。
-"""
+同步是**增量**的：只拉上次成功之后的新记录，不会重复。
+失败时断点**不会**被推进，所以下次从正确的位置续上。
+
+失败分类（一眼看出该怎么办）：
+  凭据失效     → 去 {CMD} 绑定 重新登录
+  限流         → 等几分钟再试
+  挑战未过     → 被站点风控挡了，过会儿再试
+  页面结构变化 → 对面改版了，跟我说一声
+  网络不可达   → 网络问题
+  解析失败     → 拿到了响应但解析不出来，多半也是改版"""
+
+HELP_BIND = f"""{CMD} 绑定  —— 拿一个绑定码
+
+网页本身不知道你是谁（AstrBot 的插件页面不带用户身份），
+所以第一次用网页前要证明一次：
+  1. 在这里发 {CMD} 绑定，拿到 6 位码
+  2. 打开 AstrBot WebUI → 插件 → XCPC 备赛助手 → 账号绑定
+  3. 在页面顶部「关联 QQ 号」里输入那个码
+
+码 10 分钟内有效，且只能用一次。
+
+为什么不直接在配置里填 QQ 号：那样谁都填得了，
+填错了还会把别人的账号绑到你名下。"""
+
+HELP_LOG = f"""{CMD} 日志 [n]  —— 看最近 n 条日志（默认 20）
+
+什么时候用：同步失败了、想看看它到底在干什么。
+凭据（Cookie / 密码 / token）在写进日志**之前**就已经打码，
+所以可以直接贴出来求助。"""
+
+HELP_MAIN = f"""XCPC 备赛助手
+在 QQ 里同步你的做题记录，然后每天告诉你下一步做什么。
+
+指令都挂在 {CMD} 下面（这样才不会和别的插件撞名）。
+发 {CMD} 看全部子指令。
+
+【先做这个】
+  {CMD} 自检             装完先跑这个：哪儿不对、怎么修
+  {CMD} 绑定             拿绑定码（网页关联用）
+
+【数据】
+  {CMD} 同步 [平台]      立即同步
+  {CMD} 我的状态         已同步的数据概况
+  {CMD} 比赛             比赛记录（和练习提交分开的两条流）
+  {CMD} 日志 [n]         最近日志，出问题时看这个
+
+【练什么】这是核心
+  {CMD} 方案             跑一轮：汇总数据 → 问模型 → 给你下一步
+                         可以带要求：{CMD} 方案 这周别安排 VP
+  {CMD} 打卡 [一句话]    今天做完了     ← 循环靠它闭环
+  {CMD} 做了一半         只做了一部分
+  {CMD} 没做 [原因]      今天没做
+  {CMD} 反馈 <一句话>    记一句感受（例：{CMD} 反馈 今天有点累）
+  {CMD} 总结             看**模型看到的那份汇总**（不花 token）
+
+【复盘】
+  {CMD} 解析 <粘贴>      QOJ 榜单/提交记录直接粘进来
+                         自动补全过题、罚时、AC 顺序
+  {CMD} 复盘             写一篇复盘
+  {CMD} 随手记 <内容>    记一笔，不用管格式
+  {CMD} 今天  {CMD} 状态  {CMD} 题单   原有功能
+
+【订阅】
+  {CMD} 订阅  {CMD} 退订 每日推送
+  {CMD} 推送测试         立刻推一条试试
+
+看某一组细节：{CMD} 帮助 同步    {CMD} 帮助 绑定    {CMD} 帮助 日志
+
+⚠️ 三个要知道的限制：
+  · QOJ 的提交记录**必须登录**才能看
+  · AtCoder 走社区服务，且它的 API 里**没有算法标签**
+  · 洛谷要**手动导入 Cookie**（自动登录还没打通）
+  详见 {CMD} 帮助 同步"""
+
+#: 帮助的分组：用户发 `{CMD} 帮助 <词>` 时按这里查。
+HELP_TOPICS = {
+    "同步": HELP_SYNC, "sync": HELP_SYNC,
+    "平台": HELP_SYNC, "platform": HELP_SYNC,
+    "绑定": HELP_BIND, "bind": HELP_BIND,
+    "登录": HELP_BIND, "账号": HELP_BIND,
+    "日志": HELP_LOG, "log": HELP_LOG,
+}
 
 FORMAT_TEXT = """复盘模板（照抄，把冒号后面填上就行）：
 
@@ -188,8 +264,8 @@ E 实现 独立想出 P1 边界写挂了
 写「独立想出」会自动算进 KPI；写 P0/P1/已AC 会自动算补题率。
 
 **懒得回忆就粘榜单/提交记录**：把 QOJ 或 CF 页面上那几十行原样粘在
-最后一节，/复盘 会自动补 过题 / AC 顺序 / 罚时（附算式）和逐题题号，
-你手打过的字段一个都不会被覆盖。想先看看解析对不对就发 /解析。
+最后一节，/xcpc 复盘 会自动补 过题 / AC 顺序 / 罚时（附算式）和逐题题号，
+你手打过的字段一个都不会被覆盖。想先看看解析对不对就发 /xcpc 解析。
 """
 
 
@@ -367,14 +443,22 @@ class XcpcPlugin(Star):
         self._sync_task = None
 
         # 摘掉自己注册的 Web 路由。
-        # 只摘「路由前缀匹配 **且** handler 绑在本实例上」的，
+        # 只摘「路由前缀匹配 **且** handler 属于本实例」的，
         # 免得误删别的插件、或者同一插件的另一个实例的路由。
+        #
+        # 两种形状都要认：直接注册的绑定方法（`__self__`），
+        # 以及 `_traced_route` 包过的闭包（`_xcpc_owner`）——
+        # 少认一种，热重载后路由表里就会留下指着死实例的垃圾。
+        def _mine(handler) -> bool:
+            return (getattr(handler, "__self__", None) is self
+                    or getattr(handler, "_xcpc_owner", None) is self)
+
         try:
             routes = self.context.registered_web_apis
             routes[:] = [
                 r for r in routes
                 if not (str(r[0]).startswith("/%s/" % _ROUTE_PREFIX)
-                        and getattr(r[1], "__self__", None) is self)
+                        and _mine(r[1]))
             ]
         except Exception as exc:      # 老版本没有 registered_web_apis
             logger.debug("[xcpc] 摘路由跳过：%s", exc)
@@ -412,9 +496,64 @@ class XcpcPlugin(Star):
         ]
         for path, handler, methods, desc in specs:
             try:
-                self.context.register_web_api(prefix + path, handler, methods, desc)
+                self.context.register_web_api(
+                    prefix + path, self._traced_route(prefix + path, handler),
+                    methods, desc)
             except Exception as exc:
                 logger.warning("[xcpc] 路由 %s 注册失败：%s", path, exc)
+
+    def _traced_route(self, route: str, handler):
+        """把一条网页路由包起来：**进来记一笔、崩了记一笔、慢也记一笔**。
+
+        为什么非包不可：插件页面跑在 AstrBot WebUI 的 sandbox iframe 里，
+        每个请求都要经 bridge 转一手（页面 → postMessage → 父窗口 axios →
+        插件路由 → 原路回）。**任何一段卡住，页面上都只是"正在验证…"
+        一直转** —— AstrBot 的 bridge SDK 里根本没有超时，promise 永不落地，
+        既不报错也不结束。真出问题时唯一的线索就是日志。
+
+        所以这层做三件事：
+          1. 请求进来先记 `web.req` —— 好和"请求根本没到服务端"区分开；
+          2. 未捕获的异常变成一句人话 + `web.route_fail`，不再 500；
+          3. 超过 2 秒记 `web.route_slow`（数据库被锁死会卡 30 秒，
+             这一条能直接把它认出来）。
+        """
+        # 登录轮询会一秒一条，不记 —— 记了日志就没法看了
+        is_poll = route.endswith("/events")
+
+        async def traced(**path_values):
+            started = time.monotonic()
+            if self.log and not is_poll:
+                self.log.event("web.req", detail=route)
+            try:
+                # AstrBot 把注册路由里的 <name> 匹配出来当关键字参数传进来
+                # （astrbot/dashboard/api/plugins.py 的 view_handler(**path_values)），
+                # 这里原样转交，别吞掉
+                result = await handler(**path_values)
+            except Exception as exc:                     # noqa: BLE001
+                used = int((time.monotonic() - started) * 1000)
+                if self.log:
+                    self.log.event("web.route_fail", level="error", ok=False,
+                                   error_kind="内部错误", duration_ms=used,
+                                   detail="%s -> %s: %s"
+                                          % (route, type(exc).__name__, exc))
+                logger.warning("[xcpc] 网页接口 %s 出错：%s", route,
+                               traceback.format_exc())
+                return {"ok": False,
+                        "error": "插件内部出错（%s）：%s"
+                                 % (type(exc).__name__, exc)}
+            used = int((time.monotonic() - started) * 1000)
+            if self.log and used >= 2000:
+                self.log.event("web.route_slow", duration_ms=used, detail=route)
+            return result
+
+        # `terminate()` 靠 `handler.__self__ is self` 认出"这是我注册的路由"。
+        # 包了一层之后就不再是绑定方法了，`__self__` 没了 —— 得留个自己的记号，
+        # 否则热重载时旧实例的闭包会**一直挂在路由表上**，指着已经关掉的数据库。
+        # （这个是 `test_commands.py` 的「terminate 把路由摘干净了」抓出来的。）
+        traced._xcpc_owner = self
+        traced.__name__ = getattr(handler, "__name__", "route")
+        traced.__doc__ = getattr(handler, "__doc__", None)
+        return traced
 
     # ---- 处理函数 --------------------------------------------------------
     #
@@ -445,7 +584,7 @@ class XcpcPlugin(Star):
         return self.accounts
 
     _NEED_LINK = ("网页还没和你的 QQ 号关联。\n"
-                  "  1. 在 QQ 里发 /绑定，拿到一个 6 位绑定码\n"
+                  "  1. 在 QQ 里发 /xcpc 绑定，拿到一个 6 位绑定码\n"
                   "  2. 在下面「关联 QQ 号」里输入它\n"
                   "（这样设计是为了确保操作的是**你自己的**账号 —— "
                   "网页本身不知道你是谁。）")
@@ -543,17 +682,22 @@ class XcpcPlugin(Star):
                                ok=False, error_kind="内部错误", detail=str(exc))
             return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
 
-    async def account_events(self):
+    async def account_events(self, session_id: str = ""):
         """GET accounts/login/<session_id>/events
 
         这个版本**不做 SSE 流** —— 登录步骤少（最多两步），
         页面轮询 `/login/<sid>` 就够了，SSE 在这里是过度设计。
         保留路由是为了和参考插件的形状一致，将来真要流式再加。
+
+        ⚠️ `session_id` 这个参数**必须留着**：AstrBot 会把注册路由里
+        `<session_id>` 匹配到的值当**关键字参数**传进来
+        （`view_handler(**path_values)`），签名里没有它就是一个
+        `TypeError`，路由整个不可用。`_route_path_param` 只是兜底。
         """
         user_id = await self._route_user_id()
         if not user_id:
             return {"ok": False, "need_link": True, "error": self._NEED_LINK}
-        sid = self._route_path_param("session_id")
+        sid = session_id or self._route_path_param("session_id")
         try:
             acct = await self._acct()
             return await acct.session_state(sid, user_id)
@@ -573,12 +717,17 @@ class XcpcPlugin(Star):
         except accm.AccountError as exc:
             return {"ok": False, "error": str(exc), "error_kind": exc.kind}
 
-    async def account_cancel(self):
-        """POST accounts/login/<session_id>/cancel"""
+    async def account_cancel(self, session_id: str = ""):
+        """POST accounts/login/<session_id>/cancel
+
+        和 `account_events` 一样，`session_id` 是 AstrBot 传进来的关键字参数，
+        不能省（省了就 TypeError）。
+        """
         user_id = await self._route_user_id()
         if not user_id:
             return {"ok": False, "need_link": True, "error": self._NEED_LINK}
-        sid = (self._route_path_param("session_id")
+        sid = (session_id
+               or self._route_path_param("session_id")
                or str((await self._route_body()).get("session_id") or ""))
         try:
             acct = await self._acct()
@@ -834,7 +983,7 @@ class XcpcPlugin(Star):
         网页上没有 QQ 号，而 AstrBot 的插件页面 token 只绑到「插件+页面」、
         **不带用户身份**（`build_initial_context` 里只解出 plugin_name /
         page_name / locale）。所以页面**仍然必须先认领一个绑定码**
-        （在 QQ 里发 `/绑定` 拿到）。
+        （在 QQ 里发 `/xcpc 绑定` 拿到）。
 
         为什么不在配置里填个 QQ 号了事：那样**谁都填得了**，
         填错了还会把 A 的账号绑成 B 的 —— 多用户系统里最严重的一类错误。
@@ -910,7 +1059,7 @@ class XcpcPlugin(Star):
                 "还没配置 handle。\n"
                 "只有 backend = file / http 时才需要它 —— "
                 "去 WebUI 的插件配置里填上你的 Codeforces 用户名。\n"
-                "（用默认的新核心不需要，直接 /绑定 就行。）")
+                "（用默认的新核心不需要，直接 /xcpc 绑定 就行。）")
         return h
 
     def _sender_allowed(self, event: AstrMessageEvent) -> bool:
@@ -960,31 +1109,52 @@ class XcpcPlugin(Star):
         event.should_call_llm(False)
 
     # ======================================================================
+    # 指令都挂在 `xcpc` 这个指令组下面
+    #
+    # 为什么不用裸指令名（/状态、/今天、/复盘……）：
+    # AstrBot 里同名指令是**所有插件一起接**的 —— 装个别的插件正好也叫
+    # `/状态`，两边都会回一条，用户根本分不清哪条是谁发的。
+    # 挂进指令组之后完整名字是 `/xcpc 状态`，撞车的前提就没了。
+    #
+    # 调用形式：`/xcpc 绑定`、`/xcpc 方案 这周别安排 VP`。
+    # 单独发 `/xcpc` 会把这个组下面的指令列出来。
+    # ======================================================================
+    @filter.command_group(GROUP_NAME)
+    def xcpc(self) -> None:
+        """XCPC 备赛助手的指令组。"""
+        pass
+
+    # ======================================================================
     # 指令：复盘
     # ======================================================================
-    @filter.command("复盘")
+    @xcpc.command("复盘")
     async def cmd_review(self, event: AstrMessageEvent):
         """记录一场 VP / 比赛的复盘。"""
         if not self._sender_allowed(event):
             yield event.plain_result("没有权限。")
             event.stop_event()
             return
-        body = _strip_command(event.message_str, "复盘")
+        body = _strip_command(_cmd_text(event), "复盘")
         async for r in self._do_review(event, body):
             yield r
         event.stop_event()
 
     @filter.regex(REVIEW_TRIGGER_RE)
     async def auto_review(self, event: AstrMessageEvent):
-        """直接发一段结构化的话也能记 —— 不用先打 /复盘。
+        """直接发一段结构化的话也能记 —— 不用先打 /xcpc 复盘。
 
         触发条件（见模块顶部 REVIEW_TRIGGER_RE）：单独一行「复盘」，
         或者出现「比赛:」「过题:」「罚时:」「排名:」这类强标志。
         """
-        text = (event.message_str or "").strip()
-        # 明显的指令消息交回给指令处理器，否则 /复盘 会被记两次
-        first = text.splitlines()[0].strip() if text else ""
+        text = _cmd_text(event)
+        # 明显的指令消息交回给指令处理器，否则同一条消息会被记两次。
+        # 这里看的是**原文**：`_cmd_text` 已经把组名摘掉了，
+        # 拿它来判断「这是不是一条指令」永远是 False。
+        raw = (event.message_str or "").strip()
+        first = raw.splitlines()[0].strip() if raw else ""
         if first[:1] in ("/", "／", "!", "！", "."):
+            return
+        if first == GROUP_NAME or first.startswith(GROUP_NAME + " "):
             return
         if not self._sender_allowed(event):
             return
@@ -1052,22 +1222,22 @@ class XcpcPlugin(Star):
     # ======================================================================
     # 指令：解析（只读，不落盘）
     # ======================================================================
-    @filter.command("解析", alias={"粘贴解析", "parse"})
+    @xcpc.command("解析", alias={"粘贴解析", "parse"})
     async def cmd_parse(self, event: AstrMessageEvent):
         """只解析粘贴进来的榜单/提交记录，**不写任何文件**。
 
         为什么单独做一个指令：他刚打完 VP，第一件想确认的事是"解析出来对不对"
-        —— 直接 /复盘 会先落一个文件，解析歪了还得去删。这个指令只回报，
+        —— 直接 /xcpc 复盘 会先落一个文件，解析歪了还得去删。这个指令只回报，
         顺便把"没能理解的行"原样列出来，让解析结果当场可核对。
 
-        顺带这也解释了为什么这里刷得很细：/解析 的输出就是 /复盘 会写进
+        顺带这也解释了为什么这里刷得很细：/xcpc 解析 的输出就是 /xcpc 复盘 会写进
         文件的东西，先在这儿看一眼比事后翻文件快。
         """
         if not self._sender_allowed(event):
             yield event.plain_result("没有权限。")
             event.stop_event()
             return
-        body = _strip_command(event.message_str, "解析", "粘贴解析", "parse")
+        body = _strip_command(_cmd_text(event), "解析", "粘贴解析", "parse")
         if not body.strip():
             yield event.plain_result(
                 "把榜单/提交记录粘在后面。例如：\n"
@@ -1090,7 +1260,7 @@ class XcpcPlugin(Star):
         return save
 
     # ======================================================================
-    # 粘贴解析（榜单 / 提交记录）—— /复盘 和 /解析 共用
+    # 粘贴解析（榜单 / 提交记录）—— /xcpc 复盘 和 /xcpc 解析 共用
     # ======================================================================
     def _per_fail(self) -> int:
         """罚时规则里"每次失败罚几分钟"。
@@ -1107,10 +1277,10 @@ class XcpcPlugin(Star):
     async def _parse_paste(self, text: str, per_fail: int) -> dict:
         """让后端解析粘贴内容，**失败也返回 ok=False 的 dict，不抛异常**。
 
-        为什么把异常都吃掉：``/复盘`` 的主路径是用户手打的结构化文本，
+        为什么把异常都吃掉：``/xcpc 复盘`` 的主路径是用户手打的结构化文本，
         粘贴解析只是加分项 —— 老工作区没有 ``02-tools``、http 后端那边没开机、
         版本旧到没这个端点，都不该让"复盘记不下来"。
-        ``/解析`` 会把这个 error 原样显示出来，所以不会静默失败。
+        ``/xcpc 解析`` 会把这个 error 原样显示出来，所以不会静默失败。
         """
         try:
             backend = self.backend
@@ -1136,16 +1306,16 @@ class XcpcPlugin(Star):
     # ======================================================================
     # 指令：随手记
     # ======================================================================
-    @filter.command("随手记", alias={"记", "inbox"})
+    @xcpc.command("随手记", alias={"记", "inbox"})
     async def cmd_note(self, event: AstrMessageEvent):
         """把想到的东西丢进收件箱（03-log/inbox.md）。"""
         if not self._sender_allowed(event):
             yield event.plain_result("没有权限。")
             event.stop_event()
             return
-        text = _strip_command(event.message_str, "随手记", "记", "inbox")
+        text = _strip_command(_cmd_text(event), "随手记", "记", "inbox")
         if not text.strip():
-            yield event.plain_result("要记什么？用法：/随手记 看到区间修改先想差分")
+            yield event.plain_result("要记什么？用法：/xcpc 随手记 看到区间修改先想差分")
             event.stop_event()
             return
         try:
@@ -1164,7 +1334,7 @@ class XcpcPlugin(Star):
     # ======================================================================
     # 指令：今天
     # ======================================================================
-    @filter.command("今天", alias={"today", "待办"})
+    @xcpc.command("今天", alias={"today", "待办"})
     async def cmd_today(self, event: AstrMessageEvent):
         """今天那组任务（读 00-plan/sprint.md）。"""
         try:
@@ -1199,7 +1369,7 @@ class XcpcPlugin(Star):
     # ======================================================================
     # 指令：状态
     # ======================================================================
-    @filter.command("状态", alias={"status", "st"})
+    @xcpc.command("状态", alias={"status", "st"})
     async def cmd_status(self, event: AstrMessageEvent):
         """核心指标：rating / 已 AC / 连续天数 / 个人 KPI。"""
         try:
@@ -1238,7 +1408,7 @@ class XcpcPlugin(Star):
     # ======================================================================
     # 指令：题单
     # ======================================================================
-    @filter.command("题单", alias={"list", "lists"})
+    @xcpc.command("题单", alias={"list", "lists"})
     async def cmd_lists(self, event: AstrMessageEvent):
         """当前题单的前几道。"""
         try:
@@ -1280,7 +1450,7 @@ class XcpcPlugin(Star):
     # ======================================================================
     # 指令：刷新数据
     # ======================================================================
-    @filter.command("刷新", alias={"refresh"})
+    @xcpc.command("刷新", alias={"refresh"})
     async def cmd_refresh(self, event: AstrMessageEvent):
         """重新抓 CF 数据并重跑诊断（只有 file 后端支持）。"""
         if not self._sender_allowed(event):
@@ -1331,7 +1501,7 @@ class XcpcPlugin(Star):
     # ======================================================================
     # 指令：订阅 / 退订 / 帮助 / 格式
     # ======================================================================
-    @filter.command("订阅", alias={"subscribe"})
+    @xcpc.command("订阅", alias={"subscribe"})
     async def cmd_subscribe(self, event: AstrMessageEvent):
         """订阅每天晚上那条推送。"""
         if not self._sender_allowed(event):
@@ -1348,7 +1518,7 @@ class XcpcPlugin(Star):
             % self.config.get("push_time", "22:30"))
         event.stop_event()
 
-    @filter.command("退订", alias={"unsubscribe"})
+    @xcpc.command("退订", alias={"unsubscribe"})
     async def cmd_unsubscribe(self, event: AstrMessageEvent):
         """取消推送。"""
         umo = event.unified_msg_origin
@@ -1359,7 +1529,7 @@ class XcpcPlugin(Star):
         yield event.plain_result("已退订。")
         event.stop_event()
 
-    @filter.command("推送测试", alias={"pushtest", "测试推送"})
+    @xcpc.command("推送测试", alias={"pushtest", "测试推送"})
     async def cmd_push_test(self, event: AstrMessageEvent):
         """立刻推一条今天的汇报 —— 不用等到 22:30。
 
@@ -1386,7 +1556,7 @@ class XcpcPlugin(Star):
         if not total:
             yield event.plain_result(
                 "订阅列表是空的，没东西可推 —— 先在**想收到推送的那个会话**里"
-                "发一次 /订阅（私聊就订阅私聊，群就订阅群），再回来测。")
+                "发一次 /xcpc 订阅（私聊就订阅私聊，群就订阅群），再回来测。")
         elif sent == total:
             yield event.plain_result("✅ 推送完成：%d/%d 个会话都发出去了。" % (sent, total))
         else:
@@ -1396,7 +1566,7 @@ class XcpcPlugin(Star):
                 % (sent, total))
         event.stop_event()
 
-    @filter.command("格式", alias={"模板", "format"})
+    @xcpc.command("格式", alias={"模板", "format"})
     async def cmd_format(self, event: AstrMessageEvent):
         """复盘该怎么写。"""
         text = FORMAT_TEXT.format(kinds="/".join(KIND_CHOICES),
@@ -1427,7 +1597,7 @@ class XcpcPlugin(Star):
         用它当身份意味着**同一个群里所有人共用同一个身份**，
         绑的账号会全部串在一起 —— 这正是"会绑错人"那类错误。
 
-        这个 bug 是命令接线测试抓出来的：sender 为空时 /绑定 居然
+        这个 bug 是命令接线测试抓出来的：sender 为空时 /xcpc 绑定 居然
         照样生成了码。宁可明确报错，也不要猜一个身份。
         """
         try:
@@ -1439,7 +1609,7 @@ class XcpcPlugin(Star):
         """返回 (store, None) 或 (None, 错误文案)。"""
         if self.store is None:
             return None, ("数据库不可用：%s\n"
-                          "看看 /日志 20，或检查 data_root 配置和目录权限。"
+                          "看看 /xcpc 日志 20，或检查 data_root 配置和目录权限。"
                           % (self._db_error or "未初始化"))
         return self.store, None
 
@@ -1451,9 +1621,9 @@ class XcpcPlugin(Star):
     _PLATFORM_NAME = {"codeforces": "CF", "atcoder": "AtCoder",
                       "qoj": "QOJ", "luogu": "洛谷"}
 
-    @filter.command("同步", alias={"sync"})
+    @xcpc.command("同步", alias={"sync"})
     async def cmd_sync(self, event: AstrMessageEvent):
-        """立即同步各平台。用法：/同步 [cf|atcoder|qoj|luogu]"""
+        """立即同步各平台。用法：/xcpc 同步 [cf|atcoder|qoj|luogu]"""
         store, err = self._store_or_error()
         if err:
             yield event.plain_result(err)
@@ -1466,7 +1636,7 @@ class XcpcPlugin(Star):
             yield event.plain_result("拿不到你的用户标识，没法同步：%s" % exc)
             return
 
-        text = (event.message_str or "").strip()
+        text = _cmd_text(event)
         wanted = None
         m = re.search(r"(\S+)\s*$", text)
         if m and m.group(1).lower() in self._PLATFORM_ALIAS:
@@ -1479,7 +1649,7 @@ class XcpcPlugin(Star):
             if self.log:
                 self.log.event("sync.cmd_fail", user_id=uid, ok=False,
                                error_kind="内部错误", detail=str(exc))
-            yield event.plain_result("同步出错：%s\n看 /日志 20 有细节。" % exc)
+            yield event.plain_result("同步出错：%s\n看 /xcpc 日志 20 有细节。" % exc)
             return
 
         lines = ["同步结果", report.text()]
@@ -1489,14 +1659,14 @@ class XcpcPlugin(Star):
             lines.append("")
             lines.append("失败类型：" + "、".join(kinds))
             if "凭据失效" in kinds:
-                lines.append("→ 有平台需要登录或重新登录，见 /绑定")
+                lines.append("→ 有平台需要登录或重新登录，见 /xcpc 绑定")
             if "挑战未过" in kinds:
                 lines.append("→ 被站点风控挡了，过一会儿再试；洛谷可改用手动导入 Cookie")
             if "限流" in kinds:
                 lines.append("→ 被限速了，等几分钟再同步")
         yield event.plain_result("\n".join(lines))
 
-    @filter.command("绑定", alias={"bind", "账号"})
+    @xcpc.command("绑定", alias={"bind", "账号"})
     async def cmd_bind(self, event: AstrMessageEvent):
         """生成一个绑定码，拿到网页上去认领。
 
@@ -1517,7 +1687,7 @@ class XcpcPlugin(Star):
             yield event.plain_result("拿不到你的用户标识：%s" % exc)
             return
         except Exception as exc:                        # noqa: BLE001
-            yield event.plain_result("生成绑定码失败：%s\n看 /日志 20。" % exc)
+            yield event.plain_result("生成绑定码失败：%s\n看 /xcpc 日志 20。" % exc)
             return
 
         yield event.plain_result(
@@ -1533,7 +1703,7 @@ class XcpcPlugin(Star):
             "这条消息的人才拿得到 —— 这样才不会把别人的账号绑到你名下。"
             % code)
 
-    @filter.command("我的状态", alias={"mystatus", "数据"})
+    @xcpc.command("我的状态", alias={"mystatus", "数据"})
     async def cmd_mydata(self, event: AstrMessageEvent):
         """看已同步的数据概况。"""
         store, err = self._store_or_error()
@@ -1577,10 +1747,10 @@ class XcpcPlugin(Star):
                     extra += " Δ%+d" % c["rating_delta"]
                 lines.append("  %s%s" % (d, extra))
         if not any(by_pf.values()):
-            lines += ["", "还没有数据 —— 先 /绑定 填 handle，然后 /同步。"]
+            lines += ["", "还没有数据 —— 先 /xcpc 绑定 填 handle，然后 /xcpc 同步。"]
         yield event.plain_result("\n".join(lines))
 
-    @filter.command("比赛", alias={"contests"})
+    @xcpc.command("比赛", alias={"contests"})
     async def cmd_contests(self, event: AstrMessageEvent):
         """看比赛记录（和练习提交是分开的两条流）。"""
         store, err = self._store_or_error()
@@ -1597,7 +1767,7 @@ class XcpcPlugin(Star):
         if not rows:
             yield event.plain_result(
                 "还没有比赛记录。\n"
-                "· CF 的 rated 比赛会在 /同步 时一起抓\n"
+                "· CF 的 rated 比赛会在 /xcpc 同步 时一起抓\n"
                 "· AtCoder 的比赛是从提交记录反推的"
                 "（参加了但一道没提交的看不到，排名和 rating 变化也拿不到）\n"
                 "· QOJ 的比赛记录还没做")
@@ -1618,11 +1788,11 @@ class XcpcPlugin(Star):
                 lines.append("        " + "  ".join(extra))
         yield event.plain_result("\n".join(lines))
 
-    @filter.command("日志", alias={"log"})
+    @xcpc.command("日志", alias={"log"})
     async def cmd_log(self, event: AstrMessageEvent):
         """最近 n 条日志。凭据已打码，可以直接贴出来。"""
         n = 20
-        m = re.search(r"(\d+)\s*$", (event.message_str or "").strip())
+        m = re.search(r"(\d+)\s*$", _cmd_text(event))
         if m:
             n = max(1, min(int(m.group(1)), 100))
         if self.log is None:
@@ -1637,12 +1807,12 @@ class XcpcPlugin(Star):
         yield event.plain_result("最近 %d 条日志（Cookie/密码/token 已打码）：\n%s"
                                  % (len(lines), body))
 
-    @filter.command("方案", alias={"plan", "下一步", "今天做什么"})
+    @xcpc.command("方案", alias={"plan", "下一步", "今天做什么"})
     async def cmd_plan(self, event: AstrMessageEvent):
         """跑一轮循环：聚合 → 汇总 → 模型评估 → 给你下一步。
 
         这是这个插件的核心。**它会真的调模型**（花 token），所以默认**不**自动同步 ——
-        用 /同步 先把数据弄新，再来要方案。
+        用 /xcpc 同步 先把数据弄新，再来要方案。
         """
         store, err = self._store_or_error()
         if err:
@@ -1655,7 +1825,7 @@ class XcpcPlugin(Star):
             yield event.plain_result("拿不到你的用户标识：%s" % exc)
             return
 
-        text = (event.message_str or "").strip()
+        text = _cmd_text(event)
         # 把命令词之后的剩余部分当成"额外要求"
         extra = ""
         m = re.search(r"(?:方案|plan|下一步|今天做什么)\s*(.*)$", text, re.S)
@@ -1666,9 +1836,9 @@ class XcpcPlugin(Star):
         if not has_data:
             yield event.plain_result(
                 "还没有数据，先做两步：\n"
-                "  1. /绑定      —— 去网页填 handle\n"
-                "  2. /同步      —— 把记录拉下来\n"
-                "然后再 /方案。\n\n"
+                "  1. /xcpc 绑定      —— 去网页填 handle\n"
+                "  2. /xcpc 同步      —— 把记录拉下来\n"
+                "然后再 /xcpc 方案。\n\n"
                 "（**不是「你的水平是零」，是「我还没拿到数据」** —— "
                 "这两件事完全不同。）")
             return
@@ -1685,7 +1855,7 @@ class XcpcPlugin(Star):
             if self.log:
                 self.log.event("plan.cmd_fail", user_id=uid, ok=False,
                                error_kind="内部错误", detail=str(exc))
-            yield event.plain_result("生成方案时出错：%s\n看 /日志 30。" % exc)
+            yield event.plain_result("生成方案时出错：%s\n看 /xcpc 日志 30。" % exc)
             return
 
         if not result.ok:
@@ -1693,9 +1863,9 @@ class XcpcPlugin(Star):
             head = "没能生成方案：[%s] %s" % (result.error_kind, result.detail)
             if result.used_previous:
                 head += ("\n\n下面是**你上一次的方案**，不是新生成的。"
-                         "修好问题后再 /方案。")
+                         "修好问题后再 /xcpc 方案。")
             else:
-                head += "\n\n看 /日志 30 有细节。"
+                head += "\n\n看 /xcpc 日志 30 有细节。"
             yield event.plain_result(head)
             if result.plan:
                 for chunk in self._chunk(result.plan.to_text()):
@@ -1705,26 +1875,26 @@ class XcpcPlugin(Star):
         for chunk in self._chunk(result.plan.to_text()):
             yield event.plain_result(chunk)
 
-    @filter.command("反馈", alias={"feedback", "说一句"})
+    @xcpc.command("反馈", alias={"feedback", "说一句"})
     async def cmd_feedback(self, event: AstrMessageEvent):
         """记一句反馈，下一轮方案会带上它。
 
-        比如：/反馈 今天有点累，明天少安排点
-              /反馈 这题我看了题解才会
+        比如：/xcpc 反馈 今天有点累，明天少安排点
+              /xcpc 反馈 这题我看了题解才会
         """
         store, err = self._store_or_error()
         if err:
             yield event.plain_result(err)
             return
         uid = self._uid(event)
-        text = (event.message_str or "").strip()
+        text = _cmd_text(event)
         m = re.search(r"(?:反馈|feedback|说一句)\s*(.*)$", text, re.S)
         body = (m.group(1).strip() if m else "")
         if not body:
             yield event.plain_result(
-                "/反馈 <一句话>  —— 记一句，下一轮方案会带上\n"
-                "  例：/反馈 今天有点累，明天少安排点\n"
-                "  例：/反馈 这题我看了题解才会")
+                "/xcpc 反馈 <一句话>  —— 记一句，下一轮方案会带上\n"
+                "  例：/xcpc 反馈 今天有点累，明天少安排点\n"
+                "  例：/xcpc 反馈 这题我看了题解才会")
             return
         try:
             await store.ensure_user(uid)
@@ -1732,9 +1902,9 @@ class XcpcPlugin(Star):
         except ValueError as exc:
             yield event.plain_result("拿不到你的用户标识：%s" % exc)
             return
-        yield event.plain_result("记下了：「%s」\n下次 /方案 会带上这句。" % body[:100])
+        yield event.plain_result("记下了：「%s」\n下次 /xcpc 方案 会带上这句。" % body[:100])
 
-    @filter.command("总结")
+    @xcpc.command("总结")
     async def cmd_summary(self, event: AstrMessageEvent):
         """看**模型看到的那份汇总**（不调模型，不花 token）。
 
@@ -1758,12 +1928,12 @@ class XcpcPlugin(Star):
         for chunk in self._chunk(prep["summary"].to_text(max_chars=3500)):
             yield event.plain_result(chunk)
 
-    @filter.command("自检", alias={"selfcheck", "诊断"})
+    @xcpc.command("自检", alias={"selfcheck", "诊断"})
     async def cmd_selfcheck(self, event: AstrMessageEvent):
         """装完先跑这个：一次把"哪儿不对、怎么修"说清。
 
-        比逐个试快得多 —— 不然 `/同步` 失败是网络问题还是没绑定、
-        `/方案` 失败是没模型还是没数据，每个都要猜。
+        比逐个试快得多 —— 不然 `/xcpc 同步` 失败是网络问题还是没绑定、
+        `/xcpc 方案` 失败是没模型还是没数据，每个都要猜。
         """
         uid = self._uid(event)
         try:
@@ -1781,21 +1951,21 @@ class XcpcPlugin(Star):
         for chunk in self._chunk(report.to_text()):
             yield event.plain_result(chunk)
 
-    @filter.command("打卡", alias={"done", "做完了"})
+    @xcpc.command("打卡", alias={"done", "做完了"})
     async def cmd_done(self, event: AstrMessageEvent):
-        """标记今天做完了。用法：/打卡 [一句话]
+        """标记今天做完了。用法：/xcpc 打卡 [一句话]
 
         这是**循环的第 ⑤ 环** —— 没有它的话，计划引擎永远不知道
         上一版方案有没有被执行，那它就不是"动态调整"，只是每天重新猜一次。
         """
-        yield await self._log_task(event, "done", "/打卡")
+        yield await self._log_task(event, "done", "/xcpc 打卡")
 
-    @filter.command("做了一半", alias={"partial", "半"})
+    @xcpc.command("做了一半", alias={"partial", "半"})
     async def cmd_partial(self, event: AstrMessageEvent):
         """标记今天只做了一部分。"""
-        yield await self._log_task(event, "partial", "/做了一半")
+        yield await self._log_task(event, "partial", "/xcpc 做了一半")
 
-    @filter.command("没做", alias={"skip", "skip今天"})
+    @xcpc.command("没做", alias={"skip", "skip今天"})
     async def cmd_skip(self, event: AstrMessageEvent):
         """标记今天没做。
 
@@ -1803,15 +1973,19 @@ class XcpcPlugin(Star):
         该改的是计划（量排多了），不是你的意志力 ——
         但前提是系统知道真实情况。
         """
-        yield await self._log_task(event, "skipped", "/没做")
+        yield await self._log_task(event, "skipped", "/xcpc 没做")
 
     async def _log_task(self, event: AstrMessageEvent, status: str, cmd: str):
         store, err = self._store_or_error()
         if err:
             return event.plain_result(err)
         uid = self._uid(event)
-        text = (event.message_str or "").strip()
-        m = re.search(re.escape(cmd.lstrip("/")) + r"\s*(.*)$", text, re.S)
+        text = _cmd_text(event)
+        # `cmd` 是给人看的（`/xcpc 打卡`），匹配得用剥掉前缀和组名的那截
+        word = cmd.lstrip("/")
+        if word.startswith(GROUP_NAME + " "):
+            word = word[len(GROUP_NAME) + 1:]
+        m = re.search(re.escape(word) + r"\s*(.*)$", text, re.S)
         note = (m.group(1).strip() if m else "")
         try:
             await store.ensure_user(uid)
@@ -1820,7 +1994,7 @@ class XcpcPlugin(Star):
         except ValueError as exc:
             return event.plain_result("拿不到你的用户标识：%s" % exc)
         except Exception as exc:                        # noqa: BLE001
-            return event.plain_result("记录失败：%s\n看 /日志 20。" % exc)
+            return event.plain_result("记录失败：%s\n看 /xcpc 日志 20。" % exc)
 
         if self.log:
             self.log.event("task.log", user_id=uid, status=status,
@@ -1836,19 +2010,19 @@ class XcpcPlugin(Star):
         if status == "skipped" and stats.get("skipped", 0) >= 3:
             # 连着没做 → 该动的是计划，不是催人
             lines.append("")
-            lines.append("连着几天没做 —— 下次 /方案 时直接说一句"
+            lines.append("连着几天没做 —— 下次 /xcpc 方案 时直接说一句"
                          "「最近量太多了」，让它把计划压小一点。"
                          "**连着做不完的计划等于没有计划。**")
         if status in ("done", "partial"):
-            lines.append("下次 /方案 会把这条算进去。")
+            lines.append("下次 /xcpc 方案 会把这条算进去。")
         return event.plain_result("\n".join(lines))
 
-    @filter.command("题库", alias={"bank", "problems"})
+    @xcpc.command("题库", alias={"bank", "problems"})
     async def cmd_bank(self, event: AstrMessageEvent):
         """拉取题库标注（难度 + 标签）。
 
         **这是全局的**（同一道题的难度标签对所有人都一样），所以拉一次就够。
-        `/同步` 会在它是空的时候自动拉 —— 这个命令是给"想强制刷新"用的。
+        `/xcpc 同步` 会在它是空的时候自动拉 —— 这个命令是给"想强制刷新"用的。
 
         没有题库的话：按标签的分析、**难度回避判定**、候选题，
         全都用不了。
@@ -1857,7 +2031,7 @@ class XcpcPlugin(Star):
         if err:
             yield event.plain_result(err)
             return
-        text = (event.message_str or "").strip()
+        text = _cmd_text(event)
         m = re.search(r"(?:题库|bank|problems)\s*(\S+)?", text, re.I)
         pf = ""
         if m and m.group(1):
@@ -1873,7 +2047,7 @@ class XcpcPlugin(Star):
         try:
             ok, detail, added = await self.syncer.sync_problems(pf)
         except Exception as exc:                        # noqa: BLE001
-            yield event.plain_result("拉取失败：%s\n看 /日志 20。" % exc)
+            yield event.plain_result("拉取失败：%s\n看 /xcpc 日志 20。" % exc)
             return
         after = await store.count_problems(pf)
         if ok:
@@ -1888,98 +2062,12 @@ class XcpcPlugin(Star):
                 "**没有题库的话，按标签的分析和候选题都用不了** —— "
                 "但做题记录不受影响。" % (detail, after))
 
-    @filter.command("帮助", alias={"help", "xcpc"})
+    @xcpc.command("帮助", alias={"help"})
     async def cmd_help(self, event: AstrMessageEvent):
-        """分组帮助。**写清每个平台的门槛** —— 不写清你以后会被自己坑。"""
-        text = (event.message_str or "").strip()
-        topic = ""
-        m = re.search(r"(?:帮助|help|xcpc)\s*(\S+)", text, re.I)
-        if m:
-            topic = m.group(1).strip()
-
-        if topic in ("同步", "sync", "平台", "platform"):
-            yield event.plain_result(
-                "/同步 [平台]  —— 立即同步\n\n"
-                "  不带参数：同步所有已绑定的平台\n"
-                "  带参数：  /同步 cf    /同步 atcoder    /同步 qoj    /同步 洛谷\n\n"
-                "各平台的门槛（实测，不是猜的）：\n"
-                "  CF       不需要登录，官方公开 API\n"
-                "  AtCoder  不需要登录，但走的是**社区服务**不是官方\n"
-                "           ⚠️ 它的 API 里**没有算法标签**，所以标签是空的\n"
-                "  QOJ      **必须登录**。提交记录和榜单未登录时看不到\n"
-                "  ⚠️ 洛谷   **必须登录**，而且自动登录还没打通，要手动导入 Cookie\n\n"
-                "同步是**增量**的：只拉上次成功之后的新记录，不会重复。\n"
-                "失败时断点**不会**被推进，所以下次从正确的位置续上。\n\n"
-                "失败分类（一眼看出该怎么办）：\n"
-                "  凭据失效     → 去 /绑定 重新登录\n"
-                "  限流         → 等几分钟再试\n"
-                "  挑战未过     → 被站点风控挡了，过会儿再试\n"
-                "  页面结构变化 → 对面改版了，跟我说一声\n"
-                "  网络不可达   → 网络问题\n"
-                "  解析失败     → 拿到了响应但解析不出来，多半也是改版")
-            return
-
-        if topic in ("绑定", "bind", "登录", "账号"):
-            yield event.plain_result(
-                "/绑定  —— 拿一个绑定码\n\n"
-                "网页本身不知道你是谁（AstrBot 的插件页面不带用户身份），\n"
-                "所以第一次用网页前要证明一次：\n"
-                "  1. 在这里发 /绑定，拿到 6 位码\n"
-                "  2. 打开 AstrBot WebUI → 插件 → XCPC 备赛助手 → 账号绑定\n"
-                "  3. 在页面顶部「关联 QQ 号」里输入那个码\n\n"
-                "码 10 分钟内有效，且只能用一次。\n\n"
-                "为什么不直接在配置里填 QQ 号：那样谁都填得了，\n"
-                "填错了还会把别人的账号绑到你名下。")
-            return
-
-        if topic in ("日志", "log"):
-            yield event.plain_result(
-                "/日志 [n]  —— 看最近 n 条日志（默认 20）\n\n"
-                "什么时候用：同步失败了、想看看它到底在干什么。\n"
-                "凭据（Cookie / 密码 / token）在写进日志**之前**就已经打码，\n"
-                "所以可以直接贴出来求助。")
-            return
-
-        yield event.plain_result(
-            "XCPC 备赛助手\n"
-            "在 QQ 里同步你的做题记录，然后每天告诉你下一步做什么。\n"
-            "\n"
-            "【先做这个】\n"
-            "  /自检             装完先跑这个：哪儿不对、怎么修\n"            "  /绑定             拿绑定码（网页关联用）\n"
-            "\n"
-            "【数据】\n"
-            "  /同步 [平台]      立即同步\n"
-            "  /我的状态         已同步的数据概况\n"
-            "  /比赛             比赛记录（和练习提交分开的两条流）\n"
-            "  /日志 [n]         最近日志，出问题时看这个\n"
-            "\n"
-            "【练什么】这是核心\n"
-            "  /方案             跑一轮：汇总数据 → 问模型 → 给你下一步\n"
-            "                    可以带要求：/方案 这周别安排 VP\n"
-            "  /打卡 [一句话]    今天做完了     ← 循环靠它闭环\n"
-            "  /做了一半         只做了一部分\n"
-            "  /没做 [原因]      今天没做\n"
-            "  /反馈 <一句话>    记一句感受（例：/反馈 今天有点累）\n"
-            "  /总结             看**模型看到的那份汇总**（不花 token）\n"
-            "\n"
-            "【复盘】\n"
-            "  /解析 <粘贴>      QOJ 榜单/提交记录直接粘进来\n"
-            "                    自动补全过题、罚时、AC 顺序\n"
-            "  /复盘             写一篇复盘\n"
-            "  /随手记 <内容>    记一笔，不用管格式\n"
-            "  /今天  /状态  /题单   原有功能\n"
-            "\n"
-            "【订阅】\n"
-            "  /订阅  /退订      每日推送\n"
-            "  /推送测试         立刻推一条试试\n"
-            "\n"
-            "看某一组细节：/帮助 同步    /帮助 绑定    /帮助 日志\n"
-            "\n"
-            "⚠️ 三个要知道的限制：\n"
-            "  · QOJ 的提交记录**必须登录**才能看\n"
-            "  · AtCoder 走社区服务，且它的 API 里**没有算法标签**\n"
-            "  · 洛谷要**手动导入 Cookie**（自动登录还没打通）\n"
-            "  详见 /帮助 同步")
+        """分组帮助。文案在模块顶上的 HELP_* 常量里。"""
+        m = re.search(r"(?:帮助|help)\s*(\S+)", _cmd_text(event), re.I)
+        topic = m.group(1).strip() if m else ""
+        yield event.plain_result(HELP_TOPICS.get(topic, HELP_MAIN))
 
     # ======================================================================
     # 定时推送
@@ -2022,7 +2110,7 @@ class XcpcPlugin(Star):
     async def _push_once(self) -> tuple:
         """组装并发送今天的汇报。
 
-        返回 ``(成功数, 目标数)`` —— ``/推送测试`` 要拿它报账；
+        返回 ``(成功数, 目标数)`` —— ``/xcpc 推送测试`` 要拿它报账；
         ``_daily_push_loop`` 不用，忽略即可。
         """
         from astrbot.api.event import MessageChain
@@ -2090,8 +2178,36 @@ class XcpcPlugin(Star):
 # ==========================================================================
 # 纯函数（不依赖 AstrBot，方便单测）
 # ==========================================================================
+def _cmd_text(event) -> str:
+    """命令后面那段文本，**去掉指令组名**。
+
+    AstrBot 的唤醒阶段只剥掉 wake_prefix（默认那个斜杠），指令名本身
+    留在 `event.message_str` 里。所以进到处理器时看到的是：
+
+        `xcpc 绑定 洛谷`   → 这里返回 `绑定 洛谷`
+        `xcpc`             → 这里返回 ``
+
+    这里把开头的 `xcpc ` 摘掉，剩下的形状就和以前完全一样，
+    底下那些 `_strip_command(...)` 和正则都不用动。
+
+    顺手也吃一个开头的唤醒前缀：真机上 AstrBot 已经剥过一遍了，但测试夹具
+    和别的入口给进来的字符串常常还带着那个斜杠，两种都得认。
+    """
+    text = (event.message_str or "").strip()
+    if text[:1] in ("/", "／", "!", "！", "#"):
+        text = text[1:].lstrip()
+    if text == GROUP_NAME:
+        return ""
+    if text.startswith(GROUP_NAME + " "):
+        return text[len(GROUP_NAME) + 1:].strip()
+    return text
+
+
 def _strip_command(text: str, *names: str) -> str:
-    """把 ``/复盘 xxx`` 里的指令前缀摘掉，返回后面的正文（保留换行）。"""
+    """把 ``复盘 xxx`` 里的指令词摘掉，返回后面的正文（保留换行）。
+
+    传进来的 text 已经过 `_cmd_text`，指令组名不在这里了。
+    """
     text = text or ""
     lines = text.splitlines()
     if not lines:

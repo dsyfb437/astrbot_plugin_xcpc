@@ -471,7 +471,7 @@ def _as_int(value):
     """宽松取整数：int / float / 字符串 / None 都要能过。
 
     http 后端那边是**另一个进程**，"数字"在 JSON 里可能是字符串；
-    宽容一点，总比整个 /解析 崩掉强。
+    宽容一点，总比整个 /xcpc 解析 崩掉强。
     """
     if isinstance(value, bool):
         return None
@@ -804,7 +804,7 @@ def _fmt_timeline(rows, limit: int = 14) -> list:
 
 
 def format_contest_report(report) -> list:
-    """``/复盘`` 回报里那几行"顺手解析了你粘的内容"。
+    """``/xcpc 复盘`` 回报里那几行"顺手解析了你粘的内容"。
 
     为什么非要写这么细：罚时是**估算**的，而且规则因平台而异。不把算式和
     规则摆出来，用户就不知道这个数字能不能信，回头 KPI 算错也找不到原因。
@@ -843,7 +843,7 @@ def format_contest_report(report) -> list:
     if report.get("summary"):
         lines.append("· 比赛的形状：%s" % report["summary"])
     if report.get("warnings"):
-        lines.append("· 有 %d 行没看懂 —— 发 /解析 能看到原样列表"
+        lines.append("· 有 %d 行没看懂 —— 发 /xcpc 解析 能看到原样列表"
                      % len(report["warnings"]))
     if report.get("dropped_lines"):
         lines.append("· 粘贴里的 %d 行机器格子已经变成上面的字段了，"
@@ -852,7 +852,7 @@ def format_contest_report(report) -> list:
 
 
 def format_parse_reply(parsed) -> str:
-    """``/解析`` 的回报（只读不落盘，所以要把话说全）。
+    """``/xcpc 解析`` 的回报（只读不落盘，所以要把话说全）。
 
     内容：识别类型 / 题数 / 过题 / AC 顺序 / 估算罚时+算式 / 比赛的形状 /
     时间线 / 逐题 / **没能理解的行（原样列出）**。
@@ -928,14 +928,14 @@ def format_parse_reply(parsed) -> str:
                    "② 提交记录（0:45 B Wrong Answer，题号和判题结果在同一行）。")
 
     out.append("")
-    out.append("确认没问题就把同样的内容发 /复盘 —— 手打的字段优先，不会被覆盖。")
+    out.append("确认没问题就把同样的内容发 /xcpc 复盘 —— 手打的字段优先，不会被覆盖。")
     return "\n".join(out)
 
 
 # --------------------------------------------------------------------------
 # 借用 02-tools/standings.py（file 后端专用）
 # --------------------------------------------------------------------------
-#: 路径 → 已经加载好的 standings 模块。AstrBot 是常驻进程，/复盘 可能被连着发
+#: 路径 → 已经加载好的 standings 模块。AstrBot 是常驻进程，/xcpc 复盘 可能被连着发
 #: 好几次，每次重新 exec 一遍那个文件没必要。
 _STANDINGS_CACHE: dict = {}
 
@@ -967,7 +967,7 @@ def _load_standings(root: str):
 
     为什么这么绕：workspace 可能是个**老版本**（没有 02-tools），或者这份插件
     被拷到了 AstrBot 的 data/plugins 下、旁边根本没有工作区。这几种情况都只该
-    "粘贴解析用不了"，**不该让整个 /复盘 挂掉**，所以这里从不抛异常。
+    "粘贴解析用不了"，**不该让整个 /xcpc 复盘 挂掉**，所以这里从不抛异常。
     """
     root = os.path.abspath(os.path.expanduser(root or ""))
     tools = os.path.join(root, "02-tools")
@@ -1352,7 +1352,7 @@ class WorkspaceFS:
         **改 serve.py 的 ``/api/standings`` 时，这里要跟着改。**
 
         失败（老工作区没有 02-tools、文件坏了）只返回 ``ok: False``，
-        **从不抛异常** —— 粘贴解析是加分项，不该让 /复盘 记不下来。
+        **从不抛异常** —— 粘贴解析是加分项，不该让 /xcpc 复盘 记不下来。
         """
         pf = _as_int(per_fail) or DEFAULT_PER_FAIL
         module, err = _load_standings(self.root)
@@ -1531,7 +1531,7 @@ class XcpcHttp:
         天然是"我发文本、它回结构"。
 
         和 file 后端一样**不抛异常**：那边没开机、token 过期、旧版本 serve.py
-        没有这个端点，都只是"这次解析没成"，不该让 /复盘 记不下来。
+        没有这个端点，都只是"这次解析没成"，不该让 /xcpc 复盘 记不下来。
         """
         pf = _as_int(per_fail) or DEFAULT_PER_FAIL
         try:
