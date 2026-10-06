@@ -51,21 +51,30 @@
    */
   var TIMEOUT_MS = 15000;
 
+  /* 登录接口要连对面站点（Codeforces / QOJ），慢是正常的，给宽一点。
+     别把"对面本来就慢"报成"卡死"。 */
+  var TIMEOUT_SLOW_MS = 60000;
+
+  function timeoutFor(path) {
+    return /(^|\/)login(\/|$)/.test(path) ? TIMEOUT_SLOW_MS : TIMEOUT_MS;
+  }
+
   /** 给 bridge 的 promise 掐表；超时了就把话说清楚，不装死。 */
   function withTimeout(p, path) {
     return new Promise(function (resolve, reject) {
       var done = false;
+      var ms = timeoutFor(path);
       var timer = setTimeout(function () {
         if (done) { return; }
         done = true;
         var e = new Error(
-          "等了 " + (TIMEOUT_MS / 1000) + " 秒，AstrBot 没有回应（" + path + "）。\n"
+          "等了 " + (ms / 1000) + " 秒，AstrBot 没有回应（" + path + "）。\n"
           + "去插件的 data/logs/xcpc.log 看有没有 web.req " + path + "：\n"
           + "  有 → 请求到了，是后端没答完（注意 web.route_slow / web.route_fail）；\n"
           + "  没有 → 请求根本没送到，问题在浏览器这一侧。");
         e.timeout = true;
         reject(e);
-      }, TIMEOUT_MS);
+      }, ms);
       var settle = function (fn) {
         return function (v) {
           if (done) { return; }
@@ -127,7 +136,7 @@
    *
    * 网页本身不知道你是谁 —— AstrBot 的插件页面 token 只绑到「插件+页面」，
    * **不带用户身份**（读 AstrBot 源码确认的）。所以流程是：
-   *   1. 在 QQ 里发 /绑定 拿到一个 6 位绑定码
+   *   1. 在 QQ 里发 /xcpc 绑定 拿到一个 6 位绑定码
    *   2. 在页面上输入它，后端验证后发一个网页令牌
    *   3. 之后每次请求都带上这个令牌
    *
