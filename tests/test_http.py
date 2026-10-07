@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 for _s in (sys.stdout, sys.stderr):
@@ -546,6 +547,54 @@ def test_ua() -> None:
     check("默认头里带 UA", httpm.DEFAULT_HEADERS.get("User-Agent") == httpm.BROWSER_UA)
 
 
+def test_proxy() -> None:
+    """平台代理只在自己被配上时才生效。
+
+    这里要钉死两件事：
+
+    1. **没配代理时行为一个字都不能变** —— `build_opener()` 自带的默认
+       `ProxyHandler` 照旧读 `http_proxy` / `https_proxy`。有人本来就靠这个
+       环境变量出网，加个"按平台配代理"的功能把他弄坏了是最难受的那种 bug。
+    2. **配了代理时是"替换"不是"叠加"** —— `build_opener()` 里那段 skip
+       逻辑看见已经有 `ProxyHandler` 就不再装默认那个，所以同一时刻只有一套
+       代理规则。要是叠加，实际走哪条就不可预测了。
+    """
+    print("\n[9] 平台代理")
+    P = urllib.request.ProxyHandler
+    env = {"http_proxy": "http://env-proxy:1",
+           "https_proxy": "http://env-proxy:1",
+           "no_proxy": ""}
+    old = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    try:
+        def handlers(c):
+            return [h for h in c._opener().handlers if isinstance(h, P)]
+
+        plain = httpm.HttpClient(platform="qoj")
+        check("默认 proxy 是空串（不给没配的平台加戏）", plain.proxy == "")
+        hs = handlers(plain)
+        check("没配代理时 opener 里就一个 ProxyHandler", len(hs) == 1, repr(len(hs)))
+        check("没配代理时照旧读环境变量",
+              hs[0].proxies.get("http") == "http://env-proxy:1", repr(hs[0].proxies))
+
+        proxied = httpm.HttpClient(platform="qoj", proxy="http://mine:9")
+        hs2 = handlers(proxied)
+        check("配了代理时也只有一个 ProxyHandler（是替换不是叠加）",
+              len(hs2) == 1, repr(len(hs2)))
+        check("http 走配置的代理", hs2[0].proxies.get("http") == "http://mine:9",
+              repr(hs2[0].proxies))
+        check("https 也走配置的代理", hs2[0].proxies.get("https") == "http://mine:9",
+              repr(hs2[0].proxies))
+        check("环境变量那套被顶掉了",
+              "env-proxy" not in repr(hs2[0].proxies), repr(hs2[0].proxies))
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def main() -> int:
     print("=" * 62)
     print("core/http.py + platforms/ 离线自测（不碰外网）")
@@ -562,6 +611,7 @@ def main() -> int:
     test_cookie_safety()
     test_rate_limit()
     test_ua()
+    test_proxy()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

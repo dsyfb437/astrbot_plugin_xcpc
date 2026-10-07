@@ -122,6 +122,17 @@ class HttpClient:
     # 用户可调倍率，但**有硬下限** —— 调太快会被封，这不是能商量的参数
     rate_scale: float = 1.0
     extra_headers: dict[str, str] = field(default_factory=dict)
+    # 这个平台专用的代理（`http://127.0.0.1:7890`），留空 = 不特殊处理。
+    #
+    # **这是给 QOJ 准备的。** 有些服务器的 IP 会被 Cloudflare 判定成
+    # 数据中心，`qoj.ac` 一律回 403 挑战页（响应头 `cf-mitigated: challenge`），
+    # **换 UA 完全没用** —— 实测过。单独给这一个平台挂个能过挑战的代理
+    # 就能绕过去，其它平台照常直连。
+    #
+    # ⚠️ **留空 ≠ 不走代理**。留空时行为跟以前**一模一样**：`build_opener()`
+    # 自带的默认 `ProxyHandler` 照旧读 `http_proxy` / `https_proxy` 环境变量。
+    # 这是故意的 —— 加这个功能不该悄悄改掉别人机器上已有的行为。
+    proxy: str = ""
 
     _hosts: dict[str, _Host] = field(default_factory=dict, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -205,6 +216,25 @@ class HttpClient:
             req.add_header(k, v)
         return req
 
+    def _opener(self):
+        """现造一个 opener（每次请求一个，不共享状态）。
+
+        ⚠️ **`build_opener()` 默认会塞一个读 `http_proxy` / `https_proxy`
+        环境变量的 `ProxyHandler`。** 配了平台代理时传一个自定义
+        `ProxyHandler` 进去 —— `build_opener()` 里那段 skip 逻辑看见
+        已经有 `ProxyHandler` 了就不会再装默认那个，所以是**替换**不是叠加，
+        同一时刻只有一套代理规则。
+
+        没配代理时（`self.proxy` 为空）**完全不碰** handler，行为跟以前一致：
+        照旧读环境变量。
+        """
+        if self.proxy:
+            return urllib.request.build_opener(
+                _NoRedirect,
+                urllib.request.ProxyHandler({"http": self.proxy,
+                                             "https": self.proxy}))
+        return urllib.request.build_opener(_NoRedirect)
+
     def _do_request(self, req: urllib.request.Request) -> tuple[int, bytes, str]:
         """同步发一次请求，返回 (状态码, 正文, Location 头)。
 
@@ -213,7 +243,7 @@ class HttpClient:
         注意 4xx/5xx **也是"拿到了响应"**：urllib 会抛 HTTPError，
         但错误页正文里常有线索（QOJ 的登录页就是靠这个识别的），所以要读出来。
         """
-        opener = urllib.request.build_opener(_NoRedirect)
+        opener = self._opener()
         try:
             with opener.open(req, timeout=self.timeout) as resp:
                 raw = resp.read()

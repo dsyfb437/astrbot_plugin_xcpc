@@ -85,6 +85,29 @@ git clone https://github.com/dsyfb437/astrbot_plugin_xcpc.git
 | `plan_max_minutes` | 整数 | `200` | 每天训练时长上限，超了会提醒你计划排太满 |
 | `sync_interval_min` | 整数 | `60` | 自动同步间隔。`0` = 只手动 `/xcpc 同步`。各站有速率限制，不建议低于 30 |
 | `rate_limit_scale` | 小数 | `1.0` | 拉取速度倍率。调小更慢更安全；调大有硬下限保护 |
+| `platform_proxy` | 文本 | 空 | 只给写出来的平台走代理，一行一个「平台=地址」。**一般留空**，见下 |
+
+#### 什么时候要配 `platform_proxy`
+
+只有一个场景：**qoj.ac 对你回 403**。
+
+QOJ 挂在 Cloudflare 后面。如果服务器的 IP 被判定成数据中心，它会对**所有**请求回 403 挑战页（`Just a moment...`）—— **换 UA 完全没用**，因为人家判的是 IP 不是 UA。想确认的话，在跑 AstrBot 的那台机器上直接跑：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://qoj.ac/login
+```
+
+回 `403` 就是被挡了（正常应该回 `200`）。另一个线索是日志里出现 `挑战未过`。
+
+这时给 qoj 单独挂一个能过挑战的代理：
+
+```
+qoj=http://127.0.0.1:7890
+```
+
+只有 qoj 走它，别的平台照旧直连。写法上比较宽容：换行 / 逗号 / 分号都能当分隔，`#` 后面是注释，`=` 两边空格无所谓。平台名只有四个 —— `codeforces` / `atcoder` / `qoj` / `luogu`；地址要带协议（`http://`、`socks5://`，用 socks 要先装 PySocks）。认不出来的行会被跳过，不会让插件加载失败。
+
+⚠️ **这个配置只影响写出来的平台。** 没写的平台行为跟没有这个功能时一模一样 —— 包括照旧吃 `http_proxy` / `https_proxy` 环境变量。所以别拿它当"全局代理开关"用。
 
 ### 权限与推送
 
@@ -134,6 +157,11 @@ QOJ 的 Cookie 就一个 —— 会话 cookie `__Host-UOJSESSID`（UOJ 上游叫
 
 洛谷的 `C3VK` 不用填 —— 那是 CDN 的挑战 cookie，五分钟就过期，
 插件自己会解出来，让用户填是白填。
+
+⚠️ **如果 QOJ 怎么都绑不上**，报的是 `挑战未过` 或者"被 Cloudflare 拦住"，
+那**不是 Cookie 抄错了** —— 是跑 AstrBot 这台机器的 IP 被 Cloudflare 挡了，
+换 UA、重抄 Cookie 都没用。给 qoj 单独挂个代理就能绕过去，见上面
+[`platform_proxy`](#什么时候要配-platform_proxy)。
 
 页面上每个框旁边都写了去哪儿抄。少填了关键的那个会直接点名缺哪个，
 不会含糊地说"用不了"；验证没通过的凭据不会存进库。**密码和 Cookie 都不会写进日志**，

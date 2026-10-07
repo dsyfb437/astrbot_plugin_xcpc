@@ -511,7 +511,9 @@ class XcpcPlugin(Star):
             self.store = stm.Store(self.db)
             self.syncer = syncm.Syncer(
                 self.db, self.store, recorder=self.log,
-                rate_scale=float(self.config.get("rate_limit_scale") or 1.0))
+                rate_scale=float(self.config.get("rate_limit_scale") or 1.0),
+                platform_proxies=syncm.parse_platform_proxies(
+                    self.config.get("platform_proxy")))
             self.loop = loopm.Loop(self.db, self.store, recorder=self.log,
                                    syncer=self.syncer)
             self.log.event("db.open", detail=detail)

@@ -30,6 +30,12 @@
     "default": 1.0,
     "hint": "1.0 = 默认速度（CF 约 1 请求/秒）。调小更慢更安全，调大有硬下限保护 —— 太快会被站点封。"
   },
+  "platform_proxy": {
+    "description": "只给其中几个平台走代理（一般留空）",
+    "type": "string",
+    "default": "",
+    "hint": "一行一个，格式「平台=代理地址」。例：\nqoj=http://127.0.0.1:7890\n\n**只有写出来的平台走代理**，没写的照旧。平台名四个：codeforces / atcoder / qoj / luogu。地址要带协议（http:// 或 socks5://，socks 要先装 PySocks）。行内可以写 # 注释。\n\n**这个是给 QOJ 准备的。** qoj.ac 挂在 Cloudflare 后面，服务器 IP 一旦被判定成数据中心，它对**所有**请求都回 403 挑战页 —— 换 UA 完全没用，只能换出口 IP。这时给 qoj 单独挂个代理就能绑上。别的平台用不着，**大多数情况留空就是对的**。"
+  },
   "log_level": {
     "description": "日志级别",
     "type": "string",

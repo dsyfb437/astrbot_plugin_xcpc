@@ -18,12 +18,13 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 
 from . import http as httpm
 from . import import_platform
 from . import log as logm
-from .store import Store
+from .store import PLATFORMS, Store
 
 # 平台适配器（延迟导入，避免没装的依赖影响别的平台）
 #
@@ -54,6 +55,40 @@ CLIENT_KWARGS = {
 
 # 需要登录的平台 —— 没凭据时直接报「需要登录」，不去发注定失败的请求
 NEEDS_LOGIN = ("qoj", "luogu")
+
+
+def parse_platform_proxies(text) -> dict:
+    """把配置里一行行的 `平台=代理地址` 解析成 `{平台: 地址}`。
+
+    格式**故意做得宽容**，因为这是给人手打的：换行 / 逗号 / 分号都当分隔符，
+    `=` 两边空格无所谓，`#` 开头的整行当注释。所以下面几种写法等价：
+
+        qoj=http://127.0.0.1:7890
+        qoj = http://127.0.0.1:7890   # 注释
+        qoj=http://127.0.0.1:7890, luogu=http://127.0.0.1:7891
+
+    ⚠️ **认不出来的行一律跳过，绝不抛异常。** 配置里打错一个字就让插件加载失败，
+    那是拿用户整个 bot 去赌一行配置 —— 跳过它、让那个平台退回直连，坏处小得多。
+    真出问题时的症状是"配了但没生效"，那个靠日志里的 `挑战未过` 就能看出来。
+    """
+    out: dict[str, str] = {}
+    if not text:
+        return out
+    for chunk in re.split(r"[\n,;]+", str(text)):
+        # 先砍行内注释。`#` 在代理地址里没有合法用途（那是 URL 的 fragment 段），
+        # 所以砍掉是安全的 —— 而手写配置时"地址后面跟一句说明"太常见了。
+        line = chunk.split("#", 1)[0].strip()
+        if not line:
+            continue
+        name, sep, addr = line.partition("=")
+        if not sep:
+            continue
+        name = name.strip().lower()
+        addr = addr.strip()
+        # 平台名要认，地址要非空。地址里带没带协议由 urllib 去较真。
+        if name in PLATFORMS and addr:
+            out[name] = addr
+    return out
 
 
 @dataclass
@@ -117,12 +152,17 @@ class Syncer:
 
     def __init__(self, db, store: Store, recorder: logm.Recorder | None = None,
                  rate_scale: float = 1.0, user_agent: str = "",
+                 platform_proxies: dict | None = None,
                  adapter_factory=None) -> None:
         self.db = db
         self.store = store
         self.recorder = recorder
         self.rate_scale = rate_scale
         self.user_agent = user_agent
+        # 平台 -> 代理地址。**只对写进来的平台生效**，没写的照旧。
+        # 存在的理由是 QOJ：这台机器的 IP 被 Cloudflare 判成数据中心，
+        # qoj.ac 一律回 403 挑战页，换 UA 没用，只能换出口 IP。
+        self.platform_proxies = dict(platform_proxies or {})
         # 适配器工厂。**做成可注入的**，这样测试能塞假适配器，
         # 不用去 monkeypatch 模块全局变量 —— 那种写法多个测试之间会互相污染
         # （前一个测试打的补丁留在原地，后一个测试就在不知情的情况下用了假的）。
@@ -138,14 +178,27 @@ class Syncer:
             self._locks[key] = lk
         return lk
 
+    def _client_kwargs(self, platform: str) -> dict:
+        """造 `HttpClient` 的公共参数：`CLIENT_KWARGS` + 倍率 + 平台代理。
+
+        **两个造 client 的地方都走这里** —— 不然加参数时很容易漏掉一个。
+        """
+        kw = dict(CLIENT_KWARGS.get(platform, {}))
+        kw["rate_scale"] = self.rate_scale
+        # 只给配了的平台挂代理。没配的连 `proxy` 这个键都不传，
+        # 保证行为跟没这个功能时**逐字节一致**。
+        proxy = self.platform_proxies.get(platform) or ""
+        if proxy:
+            kw["proxy"] = proxy
+        return kw
+
     async def make_client(self, user_id: str, platform: str) -> httpm.HttpClient:
         """造 client 并把该用户的凭据装进去。
 
         **凭据只在这里被读出来**，读完立刻装进 client，
         不经过任何会打日志的路径。
         """
-        kw = dict(CLIENT_KWARGS.get(platform, {}))
-        kw["rate_scale"] = self.rate_scale
+        kw = self._client_kwargs(platform)
         if self.user_agent:
             kw["extra_headers"] = dict(kw.get("extra_headers") or {})
             kw["extra_headers"]["User-Agent"] = self.user_agent
@@ -366,9 +419,8 @@ class Syncer:
         adapter = self._adapter_factory(platform)
         if not getattr(adapter, "supports_problems", False):
             return False, "这个平台不支持题库标注", 0
-        kw = dict(CLIENT_KWARGS.get(platform, {}))
-        kw["rate_scale"] = self.rate_scale
-        client = httpm.HttpClient(platform=platform, recorder=self.recorder, **kw)
+        client = httpm.HttpClient(platform=platform, recorder=self.recorder,
+                                  **self._client_kwargs(platform))
         try:
             got = await adapter.fetch_problems(client)
         except Exception as exc:

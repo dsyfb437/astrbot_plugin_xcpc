@@ -320,6 +320,67 @@ def test_multi_user_sync():
     asyncio.run(main())
 
 
+# ---------------------------------------------------------------------------
+# 7. 平台代理（给 QOJ 准备的）
+# ---------------------------------------------------------------------------
+
+def test_platform_proxies():
+    """只对配了的平台挂代理，解析要宽容，坏行不能炸。
+
+    背景：这台机器的 IP 被 Cloudflare 判成数据中心，`qoj.ac` 一律回 403
+    挑战页，**换 UA 完全没用**，只能换出口 IP。所以加了「按平台配代理」。
+
+    这里最要紧的一条是**没配的平台一个字节都不能变** —— 要是"所有平台都
+    挂上代理"，本来直连好好的 CF / 洛谷会被绕出去，那是**倒退**。
+    """
+    print("\n[7] 平台代理")
+    p = syncm.parse_platform_proxies
+
+    check("空值 -> 空字典", p("") == {} and p(None) == {} and p("   ") == {})
+    check("单个平台", p("qoj=http://127.0.0.1:7890") == {"qoj": "http://127.0.0.1:7890"})
+    check("等号两边空格无所谓",
+          p("  qoj  =  http://127.0.0.1:7890  ") == {"qoj": "http://127.0.0.1:7890"})
+    check("平台名大写也认", p("QOJ=http://a:1") == {"qoj": "http://a:1"})
+    check("换行/逗号/分号都能当分隔",
+          p("qoj=http://a:1\nluogu=http://b:2,atcoder=http://c:3;codeforces=http://d:4")
+          == {"qoj": "http://a:1", "luogu": "http://b:2",
+              "atcoder": "http://c:3", "codeforces": "http://d:4"})
+    check("行内 # 注释被砍掉", p("qoj=http://a:1  # 给 QOJ 用") == {"qoj": "http://a:1"})
+    check("整行注释被跳过", p("# qoj=http://a:1\nluogu=http://b:2") == {"luogu": "http://b:2"})
+    check("不认识的平台被忽略", p("uoj=http://a:1\nqoj=http://b:2") == {"qoj": "http://b:2"})
+    check("没有等号的行被忽略", p("qoj http://a:1") == {})
+    check("空地址被忽略", p("qoj=\nluogu=http://b:2") == {"luogu": "http://b:2"})
+    check("一坨垃圾不抛异常就返回空", p("!!!\n=\n= =\n###") == {})
+
+    async def body():
+        db, store, s, _ = await fresh()
+        try:
+            s.platform_proxies = {"qoj": "http://127.0.0.1:7890"}
+            q = s._client_kwargs("qoj")
+            c = s._client_kwargs("codeforces")
+            check("配了的平台带上 proxy", q.get("proxy") == "http://127.0.0.1:7890")
+            # ★ 重点：没配的平台**连 `proxy` 这个键都不该出现**。
+            #   一旦出现（哪怕是空串），HttpClient 就会换掉默认 ProxyHandler，
+            #   行为就跟以前不一样了。
+            check("没配的平台根本没有 proxy 键", "proxy" not in c)
+            check("没配的平台其余参数一个没动",
+                  c == dict(syncm.CLIENT_KWARGS["codeforces"], rate_scale=1.0))
+
+            cl = await s.make_client("qq1", "qoj")
+            check("make_client 造出的 client 带上了代理",
+                  cl.proxy == "http://127.0.0.1:7890")
+            cl2 = await s.make_client("qq1", "codeforces")
+            check("没配的平台造出的 client 代理为空", cl2.proxy == "")
+
+            s.platform_proxies = {}
+            check("整体没配时连 qoj 也不带 proxy",
+                  "proxy" not in s._client_kwargs("qoj"))
+        finally:
+            await db.close()
+
+    asyncio.run(body())
+
+
 def main() -> int:
     print("=" * 62)
     print("core/sync.py 自测")
@@ -330,6 +391,7 @@ def main() -> int:
     test_missing_vs_unavailable()
     test_idempotent_sync()
     test_multi_user_sync()
+    test_platform_proxies()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)
