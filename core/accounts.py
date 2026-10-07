@@ -65,6 +65,14 @@ class Session:
     platform: str
     state: str = S_PENDING
     message: str = ""
+    # 失败的分类（只取 `logm.ERROR_KINDS` 里的值）。
+    #
+    # 为什么要有这个字段：认证器**不抛异常、直接把会话标成失败**是常规路径
+    # （handle 不合法、cookie 缺字段、验证器连不上…）。`start_login()` 原来
+    # 只在 `auth.start()` **抛异常**时才记 `auth.error`，于是这条路上的失败
+    # **一行日志都不留** —— 事后完全看不出"是挂死了还是失败了"。
+    # 2026-10-07 排查用户服务器上的 QOJ 绑定 502 就是被这个坑掉的。
+    error_kind: str = "凭据失效"
     created_at: float = 0.0
     updated_at: float = 0.0
     # 平台自己需要跨步骤带的东西（比如 QOJ 的 _token）。
@@ -202,6 +210,9 @@ class HandleOnly:
         except Exception as exc:                       # noqa: BLE001
             session.state = S_FAILED
             session.message = "验证失败：%s" % exc
+            # `HttpError` 自带分类（挑战未过 / 网络不可达 / …），照实带上，
+            # 别一律记成"内部错误"——那会让日志失去分辨力
+            session.error_kind = getattr(exc, "kind", "内部错误")
             return session
 
         if not got.ok:
@@ -429,6 +440,7 @@ class ManualCookie:
             except Exception as exc:                   # noqa: BLE001
                 session.state = S_FAILED
                 session.message = "验证时出错：%s" % exc
+                session.error_kind = getattr(exc, "kind", "内部错误")
                 return session
             if not ok:
                 session.state = S_FAILED
@@ -575,10 +587,14 @@ class AccountService:
         except Exception as exc:                        # noqa: BLE001
             session.state = S_FAILED
             session.message = "%s: %s" % (type(exc).__name__, exc)
-            if self.recorder:
-                self.recorder.event("auth.error", user_id=owner_id, platform=platform,
-                                    ok=False, error_kind=getattr(exc, "kind", "内部错误"),
-                                    detail=str(exc))
+            session.error_kind = getattr(exc, "kind", "内部错误")
+        # ⚠️ **两条路都要记日志**：抛异常是一条，**正常返回一个失败会话**是
+        # 另一条（而且更常见 —— 认证器普遍把异常吞掉自己标失败）。
+        # 只在 except 里记的话，后者就是"点了绑定，日志里什么都没有"。
+        if session.state == S_FAILED and self.recorder:
+            self.recorder.event("auth.error", user_id=owner_id, platform=platform,
+                                ok=False, error_kind=session.error_kind,
+                                detail=session.message)
 
         session.updated_at = time.time()
         await self._persist_if_ok(owner_id, platform, session)
@@ -594,6 +610,12 @@ class AccountService:
         except Exception as exc:                        # noqa: BLE001
             session.state = S_FAILED
             session.message = "%s: %s" % (type(exc).__name__, exc)
+            session.error_kind = getattr(exc, "kind", "内部错误")
+        if session.state == S_FAILED and self.recorder:
+            self.recorder.event("auth.error", user_id=session.owner_id,
+                                platform=session.platform, ok=False,
+                                error_kind=session.error_kind,
+                                detail=session.message)
         session.updated_at = time.time()
         await self._persist_if_ok(session.owner_id, session.platform, session)
         return session.public()

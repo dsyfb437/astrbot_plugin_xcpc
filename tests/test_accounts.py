@@ -819,6 +819,84 @@ def test_either_of():
     asyncio.run(main())
 
 
+# ---------------------------------------------------------------------------
+# 12. 认证器"静默失败"也必须留日志
+# ---------------------------------------------------------------------------
+
+def test_silent_failure_logs():
+    print("\n[12] 认证器静默失败时也记 auth.error")
+
+    class FakeLog:
+        """最小 recorder：只把 event() 记进内存，方便直接断言。"""
+
+        def __init__(self):
+            self.rows = []
+
+        def event(self, name, **kw):
+            self.rows.append((name, kw))
+
+    async def main():
+        db, store, _, _ = await setup()
+
+        async def factory(user_id, platform):
+            return FakeClient()
+
+        # ---- ① 验证器自己抛异常 ----------------------------------------
+        # `ManualCookie.start()` 会把异常**吞掉**、然后正常返回一个失败会话。
+        # 这正是 2026-10-07 排查用户服务器上 QOJ 绑定时"日志里一片空白"的
+        # 原因 —— `start_login()` 原来只在 `auth.start()` **抛异常**时才记
+        # `auth.error`，这条路上一个字节都不留。
+        async def boom(cookies, client):
+            raise accm.AccountError("被 Cloudflare 拦住（挑战未过）", "挑战未过")
+
+        log1 = FakeLog()
+        svc1 = accm.AccountService(
+            store, recorder=log1, client_factory=factory,
+            authenticators={"luogu": accm.ManualCookie(
+                platform="luogu", required=("__client_id",), verifier=boom)})
+        snap1 = await svc1.start_login("qq1001", "luogu", {"__client_id": "v"})
+        check("验证器抛异常时会话是 failed", snap1["state"] == "failed",
+              snap1["message"])
+        errs1 = [kw for name, kw in log1.rows if name == "auth.error"]
+        check("★ 静默失败也记了 auth.error", len(errs1) == 1, repr(log1.rows))
+        check("分类照实带上、不是「内部错误」",
+              bool(errs1) and errs1[0].get("error_kind") == "挑战未过",
+              repr(errs1))
+
+        # ---- ② 认证器不抛异常、自己标失败 ------------------------------
+        # 这条路**更常见**（handle 格式不对、cookie 缺字段、认不出 uid…），
+        # 以前同样不留痕。
+        log2 = FakeLog()
+        svc2 = accm.AccountService(
+            store, recorder=log2, client_factory=factory,
+            authenticators={"codeforces": accm.HandleOnly(
+                platform="codeforces", fetcher=lambda h, c: None)})
+        snap2 = await svc2.start_login("qq1002", "codeforces", {"handle": "a"})
+        check("handle 太短时失败", snap2["state"] == "failed", snap2["message"])
+        errs2 = [kw for name, kw in log2.rows if name == "auth.error"]
+        check("★ 不抛异常的失败也记了 auth.error", len(errs2) == 1, repr(log2.rows))
+        check("这时也记了 auth.start（前后对得上）",
+              [n for n, _ in log2.rows].count("auth.start") == 1, repr(log2.rows))
+
+        # ---- ③ 成功时**不该**有 auth.error -----------------------------
+        async def good(cookies, client):
+            return True, "验证通过"
+
+        log3 = FakeLog()
+        svc3 = accm.AccountService(
+            store, recorder=log3, client_factory=factory,
+            authenticators={"luogu": accm.ManualCookie(
+                platform="luogu", required=("__client_id",), verifier=good)})
+        snap3 = await svc3.start_login("qq1003", "luogu", {"__client_id": "v"})
+        check("验证通过", snap3["state"] == "ok", snap3["message"])
+        check("成功时不会误记 auth.error",
+              not [n for n, _ in log3.rows if n == "auth.error"], repr(log3.rows))
+
+        await db.close()
+
+    asyncio.run(main())
+
+
 def main() -> int:
     print("=" * 62)
     print("core/accounts.py 自测（假 client，不联网）")
@@ -834,6 +912,7 @@ def main() -> int:
     test_cancel()
     test_bound_status()
     test_either_of()
+    test_silent_failure_logs()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

@@ -295,8 +295,11 @@ class HttpClient:
                                        platform=self.platform, error_kind="挑战未过",
                                        note="Cloudflare", level="info")
                 raise HttpError(
-                    "%s 被 Cloudflare 拦住（挑战未过）。当前 UA 可能被判定为机器人。"
-                    % host, "挑战未过", status)
+                    "%s 被 Cloudflare 拦住（挑战未过）。绝大多数情况是**这台"
+                    "机器的 IP 被判定成了数据中心**，不是 UA 的问题 —— "
+                    "换 UA 没用，你在自己浏览器里能打开登录页也没用，"
+                    "因为插件发请求时还是从这台机器出去。" % host,
+                    "挑战未过", status)
 
             # ---- 洛谷 C3VK 挑战：cookie 值明文写在返回的 JS 里，解析后重试
             #
