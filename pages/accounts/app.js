@@ -194,18 +194,24 @@
     {
       id: "qoj", name: "QOJ",
       note: "两条路选一条。填用户名和密码登录（账号开了两步验证的话，"
-          + "提交后会再要一次验证码）；**或者**把下面两个 Cookie 填上 —— "
+          + "提交后会再要一次验证码）；**或者**走下面的 Cookie —— "
           + "先在自己的浏览器里登录 QOJ，从开发者工具的 Application → "
-          + "Cookies 里把这两个的名字和值抄过来，这样密码一次都不用"
+          + "Cookies 里把下面几个的名字和值抄过来，这样密码一次都不用"
           + "经过这台服务器。QOJ 没有第三方登录可跳，填 Cookie 就是"
-          + "那个\"不用输密码\"的办法。两条路只要有一条填了就行。",
+          + "那个\"不用输密码\"的办法。"
+          + "只有第一个是必须的，会话就靠它；后面两个登录时会一起下发，"
+          + "抄上更耐用，找不到就留空。"
+          + "上面那个用户名框填了的话，也能当作用户 ID。",
       fields: [
         { k: "username", label: "用户名", ph: "", type: "text" },
         { k: "password", label: "密码", ph: "", type: "password" },
-        { k: "__client_id", label: "Cookie：__client_id",
-          ph: "会话 id，一长串", type: "textarea", wide: true },
-        { k: "uoj_username", label: "Cookie：uoj_username",
-          ph: "就是你的 QOJ 用户名", type: "text" }
+        { k: "__Host-UOJSESSID",
+          label: "Cookie：__Host-UOJSESSID（必填，会话就靠它）",
+          ph: "一长串随机字符", type: "textarea", wide: true },
+        { k: "uoj_username", label: "Cookie：uoj_username（你的用户名）",
+          ph: "就是你的 QOJ 用户名", type: "text" },
+        { k: "uoj_remember_token", label: "Cookie：uoj_remember_token",
+          ph: "60 个字符，让插件在会话过期后自己恢复登录", type: "text" }
       ]
     },
     {
@@ -217,8 +223,8 @@
           + "形如 luogu.com.cn/user/123456。"
           + "C3VK 不用填 —— 那个 5 分钟就过期，插件自己会解。",
       fields: [
-        { k: "__client_id", label: "Cookie：__client_id",
-          ph: "会话 id，一长串", type: "textarea", wide: true },
+        { k: "__client_id", label: "Cookie：__client_id（必填，会话就靠它）",
+          ph: "一长串随机字符", type: "textarea", wide: true },
         { k: "_uid", label: "Cookie：_uid（你的用户 ID）",
           ph: "例如 123456", type: "text" }
       ]

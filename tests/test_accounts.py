@@ -218,7 +218,7 @@ def test_session_owner():
     async def main():
         db, store, svc, _ = await setup(routes={
             ("GET", "/login"): FakeResp(200, QOJ_LOGIN_PAGE),
-            ("POST", "/login"): lambda c: (c.cookies.update({"__client_id": "x"})
+            ("POST", "/login"): lambda c: (c.cookies.update({"__Host-UOJSESSID": "x"})
                                            or FakeResp(200, "{}")),
         })
         snap = await svc.start_login("qq1001", "qoj",
@@ -272,7 +272,7 @@ def test_no_credential_leak():
         db, store, svc, _ = await setup(routes={
             ("GET", "/login"): FakeResp(200, QOJ_LOGIN_PAGE),
             ("POST", "/login"): lambda c: (c.cookies.update(
-                {"__client_id": "SUPER_SECRET_SESSION"}) or FakeResp(200, "{}")),
+                {"__Host-UOJSESSID": "SUPER_SECRET_SESSION"}) or FakeResp(200, "{}")),
         })
         snap = await svc.start_login("qq1001", "qoj",
                                      {"username": "u", "password": "p"})
@@ -290,7 +290,7 @@ def test_no_credential_leak():
         # 但 get_cookies 应该拿得到（那是同步层要用的）
         ck = await svc.get_cookies("qq1001", "qoj")
         check("get_cookies 能拿到（给同步层用）",
-              ck.get("__client_id") == "SUPER_SECRET_SESSION", repr(ck)[:80])
+              ck.get("__Host-UOJSESSID") == "SUPER_SECRET_SESSION", repr(ck)[:80])
 
         # repr 里也不该有
         for s in svc._sessions.values():
@@ -312,7 +312,7 @@ def test_qoj_2fa():
     async def main():
         # 第一次登录返回"要 2fa"
         db, store, svc, _ = await setup(routes={
-            "/login/2fa": lambda c: (c.cookies.update({"__client_id": "after2fa"})
+            "/login/2fa": lambda c: (c.cookies.update({"__Host-UOJSESSID": "after2fa"})
                                      or FakeResp(200, "{}")),
             "/login": FakeResp(200, QOJ_LOGIN_PAGE),
         })
@@ -322,7 +322,7 @@ def test_qoj_2fa():
         db2, store2, svc2, _ = await setup(routes={
             ("GET", "/login"): FakeResp(200, QOJ_LOGIN_PAGE),
             ("POST", "/login/2fa"): lambda c: (c.cookies.update(
-                {"__client_id": "ok2fa"}) or FakeResp(200, "{}")),
+                {"__Host-UOJSESSID": "ok2fa"}) or FakeResp(200, "{}")),
             ("POST", "/login"): FakeResp(200, '{"msg":"2fa"}'),
         })
         snap = await svc2.start_login("qq1001", "qoj",
@@ -340,7 +340,7 @@ def test_qoj_2fa():
         snap3 = await svc2.submit_2fa(snap["session_id"], "qq1001", "123456")
         check("两步验证后登录成功", snap3["state"] == "ok", snap3["message"])
         ck = await store2.get_credentials("qq1001", "qoj")
-        check("凭据落库了", ck.get("__client_id") == "ok2fa", repr(ck)[:80])
+        check("凭据落库了", ck.get("__Host-UOJSESSID") == "ok2fa", repr(ck)[:80])
 
         # 会话过期（丢了 token）要如实报
         s = svc2._sessions[snap["session_id"]]
@@ -509,7 +509,7 @@ def test_logout():
 
     async def main():
         db, store, svc, _ = await setup()
-        await store.set_credentials("qq1001", "qoj", {"__client_id": "x"})
+        await store.set_credentials("qq1001", "qoj", {"__Host-UOJSESSID": "x"})
         await store.set_handle("qq1001", "qoj", "someone")
         await store.upsert_submissions("qq1001", "qoj", [
             Submission("qoj", "1", "QOJ:1")])
@@ -522,10 +522,10 @@ def test_logout():
               "%d" % await store.count_submissions("qq1001", "qoj"))
 
         # 只影响自己
-        await store.set_credentials("qq2002", "qoj", {"__client_id": "y"})
+        await store.set_credentials("qq2002", "qoj", {"__Host-UOJSESSID": "y"})
         await svc.logout("qq1001", "qoj")
         check("不影响别人的凭据",
-              (await store.get_credentials("qq2002", "qoj")).get("__client_id") == "y")
+              (await store.get_credentials("qq2002", "qoj")).get("__Host-UOJSESSID") == "y")
 
         try:
             await svc.logout("", "qoj")
@@ -742,24 +742,48 @@ def test_either_of():
         check("cookie 那条路认得 uoj_username",
               getattr(auth.cookie_path, "uid_cookie", "") == "uoj_username")
 
+        # 用户报过：QOJ 上没有 `__client_id`（那是洛谷的）。那时我们照洛谷抄，
+        # 结果"登录成功"被判成失败。这两条是防它再抄回去。
+        qoj_names = tuple(getattr(auth.cookie_path, "cookie_names", ()))
+        check("QOJ 的 cookie 名单里没有 __client_id（那是洛谷的）",
+              "__client_id" not in qoj_names, repr(qoj_names))
+        check("QOJ 只把会话 cookie 列为必填",
+              tuple(getattr(auth.cookie_path, "required", ())) == ("__Host-UOJSESSID",),
+              repr(getattr(auth.cookie_path, "required", ())))
+        check("QOJ 认 __Host-UOJSESSID（qoj.ac 的实发名）",
+              accm.has_qoj_session({"__Host-UOJSESSID": "s"}))
+        check("QOJ 也认没前缀的 UOJSESSID（自建 UOJ）",
+              accm.has_qoj_session({"UOJSESSID": "s"}))
+        check("洛谷那个 __client_id 不算 QOJ 的会话",
+              not accm.has_qoj_session({"__client_id": "s"}))
+
         async def ok_verify(cookies, client):
             return True, "验证通过，拉到 2 条记录"
         auth.cookie_path.verifier = ok_verify
 
         r = await svc.start_login("qq1001", "qoj",
-                                  {"__client_id": "x", "uoj_username": "alice"})
+                                  {"__Host-UOJSESSID": "sess", "uoj_username": "alice"})
         check("填了 cookie 就走 cookie 那条路", r["state"] == "ok", r["message"])
         check("QOJ 用户名落成 qoj_uid",
               await store.get_handle("qq1001", "qoj") == "alice",
               await store.get_handle("qq1001", "qoj"))
         check("QOJ 凭据落库",
-              (await store.get_credentials("qq1001", "qoj")).get("__client_id") == "x")
+              (await store.get_credentials("qq1001", "qoj")).get("__Host-UOJSESSID")
+              == "sess")
 
-        # 只填一半也算走了 cookie 那条路，然后点名缺什么
-        r15 = await svc.start_login("qq1501", "qoj", {"__client_id": "x"})
-        check("只填一个 cookie 时点名 uoj_username",
+        # 只抄了会话 cookie、名字框也空着 → 认不出用户 id，点名 uoj_username
+        r15 = await svc.start_login("qq1501", "qoj", {"__Host-UOJSESSID": "sess"})
+        check("只填会话 cookie 时点名 uoj_username",
               r15["state"] == "failed" and "uoj_username" in r15["message"],
               r15["message"])
+
+        # 只抄了会话 cookie，但名字框填了 → 也算认出来了（uid 兜底）
+        r16 = await svc.start_login(
+            "qq1601", "qoj", {"__Host-UOJSESSID": "sess", "username": "bob"})
+        check("用户名框能当 QOJ 的用户 id", r16["state"] == "ok", r16["message"])
+        check("兜底来的用户名也落成 qoj_uid",
+              await store.get_handle("qq1601", "qoj") == "bob",
+              await store.get_handle("qq1601", "qoj"))
 
         # 一个 cookie 框都不填 → 仍然走原来的密码路
         r2 = await svc.start_login("qq2002", "qoj", {"username": "", "password": ""})

@@ -216,6 +216,27 @@ class HandleOnly:
         return session
 
 
+# QOJ / UOJ 的会话 cookie 名。
+#
+# **不是 `__client_id`** —— 那是洛谷的（`platforms/luogu.py` 用），QOJ 上
+# 根本没有这个 cookie。这里曾经写成 `__client_id` 过，是照着洛谷那条
+# 抄过来的，白白把"登录成功"判成失败。
+#
+# 上游 `vfleaking/uoj` 的 `web/app/models/Session.php` 里是
+# `session_name('UOJSESSID')`；qoj.ac 部署时加了 `__Host-` 前缀，实发头就是
+# `set-cookie: __Host-UOJSESSID=…; path=/; secure; HttpOnly; SameSite=Lax`。
+# 两个名字都认，别人自建的 UOJ 可能没前缀。
+QOJ_SESSION_COOKIES = ("__Host-UOJSESSID", "UOJSESSID")
+
+
+def has_qoj_session(jar: dict) -> bool:
+    """这个 cookie 罐里有 QOJ 的会话吗。"""
+    for key in jar or {}:
+        if key in QOJ_SESSION_COOKIES or str(key).endswith("UOJSESSID"):
+            return True
+    return False
+
+
 @dataclass
 class QojLogin:
     """QOJ：用户名 + 密码，**可能要两步验证**。
@@ -266,7 +287,7 @@ class QojLogin:
 
         # 成功判据：**拿到了会话 cookie**。不看状态码。
         got_cookies = dict(client.cookies)
-        if got_cookies.get("__client_id") or got_cookies.get("uoj_username"):
+        if has_qoj_session(got_cookies):
             session.cookies = got_cookies
             session.ctx["username"] = username
             session.state = S_OK
@@ -310,7 +331,7 @@ class QojLogin:
         resp = await client.post_form(self.origin + "/login/2fa",
                                       {"_token": token, "code": code})
         got_cookies = dict(client.cookies)
-        if got_cookies.get("__client_id") or got_cookies.get("uoj_username"):
+        if has_qoj_session(got_cookies):
             session.cookies = got_cookies
             session.state = S_OK
             session.message = "登录成功"
@@ -388,7 +409,14 @@ class ManualCookie:
             session.message = "一个 cookie 都没填"
             return session
 
-        uid = str(cookies.get(self.uid_cookie) or "").strip() if self.uid_cookie else ""
+        # 用户 id 从哪来：优先 uid_cookie（洛谷的 `_uid`、QOJ 的 `uoj_username`），
+        # 拿不到就退回表单上那个名字框 —— 有人只抄了会话 cookie，
+        # 不该因为少抄一个就整个绑不上。
+        uid = ""
+        if self.uid_cookie:
+            uid = str(cookies.get(self.uid_cookie) or "").strip()
+        if not uid:
+            uid = str(fields.get("username") or fields.get("handle") or "").strip()
 
         session.state = S_WORKING
         session.message = "正在验证…"
@@ -409,8 +437,8 @@ class ManualCookie:
 
         if self.uid_cookie and not uid:
             session.state = S_FAILED
-            session.message = ("没填 `%s`，认不出你的用户 ID。"
-                               "它在你的主页地址里，形如 luogu.com.cn/user/123456。"
+            session.message = ("没填 `%s`，也没在上面那个名字框里填名字，"
+                               "认不出你是谁 —— 这个平台的提交记录得按用户查。"
                                % self.uid_cookie)
             return session
 
@@ -701,10 +729,18 @@ def default_authenticators() -> dict:
         "atcoder": HandleOnly(platform="atcoder", fetcher=atc_fetch),
         "qoj": EitherOf(
             primary=QojLogin(),
-            # 两个都得填：__client_id 是会话，uoj_username 是用户名。
-            # 用户名不能省 —— 它是 qoj_uid 的来源，空了自动同步会漏掉这个人
+            # 真正必须的只有会话 cookie（`QOJ_SESSION_COOKIES`，qoj.ac 上
+            # 实发名是 `__Host-UOJSESSID`）。
+            #
+            # `uoj_username` / `uoj_remember_token` 是 UOJ 在登录时一起下发的
+            # 两个 10 年期的 cookie（`web/app/models/Auth.php` 的
+            # `Auth::login()` 里 `Cookie::safeSet('uoj_username', …)`；
+            # 登录控制器调的就是默认 `$remember = true`）。前者是 qoj_uid
+            # 的来源，后者能让服务端在会话过期后自己恢复登录态 ——
+            # 都填上更耐用，所以列为选填而不是必填。
             cookie_path=ManualCookie(platform="qoj",
-                                     required=("__client_id", "uoj_username"),
+                                     required=("__Host-UOJSESSID",),
+                                     optional=("uoj_username", "uoj_remember_token"),
                                      uid_cookie="uoj_username",
                                      verifier=qoj_verify),
         ),

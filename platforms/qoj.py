@@ -32,6 +32,20 @@ from .base import Fetched, Problem, Submission
 
 ORIGIN = "https://qoj.ac"
 
+# 会话 cookie 名。**不是 `__client_id`** —— 那是洛谷的，QOJ 上没有这个东西。
+# 上游 `vfleaking/uoj` 的 `web/app/models/Session.php` 里是
+# `session_name('UOJSESSID')`；qoj.ac 部署时加了 `__Host-` 前缀，实发头就是
+# `set-cookie: __Host-UOJSESSID=…; path=/; secure; HttpOnly; SameSite=Lax`。
+# 两个名字都认，别人自建的 UOJ 可能没前缀。
+
+
+def _has_session_cookie(jar: dict) -> bool:
+    for key in jar or {}:
+        if key in ("__Host-UOJSESSID", "UOJSESSID") or str(key).endswith("UOJSESSID"):
+            return True
+    return False
+
+
 # 登录页里的 CSRF token
 _TOKEN_RE = re.compile(r"""_token\s*:\s*["']([^"']{8,200})["']""")
 # 登录页判定（所有数据页未登录时返回的都是它）
@@ -92,7 +106,7 @@ class Qoj:
 
         # 成功与否看**有没有拿到会话 cookie**，而不是看状态码 ——
         # QOJ 登录失败也回 200，只在 JSON 里给 msg。
-        if client.cookies.get("__client_id") or client.cookies.get("uoj_username"):
+        if _has_session_cookie(client.cookies):
             return Fetched(ok=True, detail="登录成功")
 
         body = resp.text[:500]
