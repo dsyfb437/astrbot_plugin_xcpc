@@ -2,7 +2,7 @@ name: astrbot_plugin_xcpc # 插件唯一识别名（必须与目录名一致，�
 display_name: XCPC 备赛助手 # 展示名（需 AstrBot >= v4.5.0，低版本忽略不报错）
 desc: 把 XCPC 备赛工作区接进聊天软件 —— 地铁上用一段话完成 VP 复盘，随手查状态、题单和今天的任务；QOJ 的榜单/提交记录直接粘进来就能自动补全过题、罚时和 AC 顺序。
 short_desc: 用聊天完成 XCPC 复盘与训练查询。
-version: v0.5.2
+version: v0.5.3
 author: dsyfb437
 repo: https://github.com/dsyfb437/astrbot_plugin_xcpc
 # ⚠️ 从 4.26 起才有「插件 Pages」能力（WebUI 里挂自定义页面 + register_web_api），

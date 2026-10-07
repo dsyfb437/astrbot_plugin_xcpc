@@ -132,6 +132,29 @@ def parse_cookie_text(text: str) -> dict[str, str]:
     return out
 
 
+def _cookie_field(raw: str, name: str) -> str:
+    """把某个输入框里的东西变成这个 cookie 的值。
+
+    每个 cookie 一个框，用户照着开发者工具里的名字填就行，不用自己拼分号。
+    但为了让复制粘贴的人少返工，这三种填法都认：
+
+        就是值              `abc123`
+        `名字=值`           `_uid=123456`          （从工具里整行复制的）
+        整条 Cookie 串      `a=b; _uid=123456`     （粘错了框也能救回来）
+
+    含控制字符的一律丢掉 —— 这些值最后会被拼进 HTTP 头，
+    这是 header 注入的经典入口。（`http.py` 里还有一道同样的闸门。）
+    """
+    raw = str(raw or "").strip()
+    if not raw or "\x00" in raw:
+        return ""
+    if any(c in raw for c in ";\r\n"):
+        return str(parse_cookie_text(raw).get(name) or "").strip()
+    if raw.lower().startswith(name.lower() + "="):
+        raw = raw[len(name) + 1:]
+    return raw.strip().strip(";").strip().strip('"').strip("'")
+
+
 def cookie_status(cookies: dict) -> str:
     """判断一份 cookie 像不像"能用的登录态"。
 
@@ -303,12 +326,19 @@ class QojLogin:
 
 @dataclass
 class ManualCookie:
-    """手动导入 Cookie。
+    """手动导入 Cookie —— 每个 cookie 一个输入框，不用自己拼分号。
 
     **这不是降级路径，是设计内的路径。** 洛谷的自动登录还没打通，
     QOJ 也没有 OAuth（登录页上就账号密码两个框，实测过），
     而用户在浏览器里登录后复制 Cookie 是完全可行的 ——
     同样能拿到完整数据，只是步骤多一点。
+
+    `required` / `optional` 里写的是 **cookie 名**，同时也是表单字段名 ——
+    页面照着这两个元组渲染输入框，这边照着同样的名字取值，一处定义两处用。
+
+    洛谷的 `C3VK` **不在这里**：那是 CDN 的挑战 cookie，值 5 分钟就过期
+    （源码里写死 `max-age=300`），`core/http.py` 会自己解出来装上，
+    让用户去填是白填。
 
     `uid_cookie` 是这个站点把**用户 id** 放在哪个 cookie 里（洛谷是 `_uid`）。
     洛谷的提交记录得靠 `/record/list?user=<uid>` 才拉得到，认不出来的话
@@ -317,30 +347,48 @@ class ManualCookie:
     """
 
     platform: str
-    required: tuple = ()      # 至少要有的字段名（空 = 不检查）
+    required: tuple = ()      # 必填的 cookie 名
+    optional: tuple = ()      # 选填的，填了就带上
     verifier: Any = None      # async (cookies, client) -> (ok, message)
     uid_cookie: str = ""      # 用户 id 在哪个 cookie 里（空 = 这个平台不需要）
 
+    @property
+    def cookie_names(self) -> tuple:
+        """表单上要出现的输入框，顺序就是这个顺序。"""
+        return tuple(self.required) + tuple(self.optional)
+
     async def start(self, svc, session: Session, fields: dict) -> Session:
-        raw = str(fields.get("cookies") or fields.get("cookie") or "").strip()
-        cookies = parse_cookie_text(raw)
-        if not cookies:
-            session.state = S_FAILED
-            session.message = "没解析出任何 cookie —— 格式像是 `名字=值; 名字=值`"
-            return session
-        missing = [k for k in self.required if k not in cookies]
+        raws = {n: str(fields.get(n) or "") for n in self.cookie_names}
+        # 有人会把整条 Cookie 串（带分号的那种）粘进某一个框 ——
+        # 那就顺手从里面把别的字段捞出来，别让人白填一遍。
+        spill: dict[str, str] = {}
+        for raw in raws.values():
+            if any(c in raw for c in ";\r\n"):
+                spill.update(parse_cookie_text(raw))
+
+        cookies: dict[str, str] = {}
+        missing: list[str] = []
+        for name in self.cookie_names:
+            value = _cookie_field(raws.get(name, ""), name) or spill.get(name, "")
+            if value:
+                cookies[name] = value
+            elif name in self.required:
+                missing.append(name)
+
         if missing:
             session.state = S_FAILED
-            session.message = ("缺关键字段：%s。解析出来的字段有 %s —— "
-                               "确认复制的是**登录后**的完整 Cookie。"
+            session.message = ("缺关键字段：%s。填了的字段有 %s —— "
+                               "这些 cookie 登录之后才有，"
+                               "没登录的话开发者工具里根本看不到。"
                                % ("、".join(missing),
                                   "、".join(sorted(cookies)) or "（一个都没有）"))
             return session
+        if not cookies:
+            session.state = S_FAILED
+            session.message = "一个 cookie 都没填"
+            return session
 
-        # 用户 id：表单里填了就用填的，没填就看 cookie 里带没带
-        uid = str(fields.get("handle") or fields.get("username") or "").strip()
-        if not uid and self.uid_cookie:
-            uid = str(cookies.get(self.uid_cookie) or "").strip()
+        uid = str(cookies.get(self.uid_cookie) or "").strip() if self.uid_cookie else ""
 
         session.state = S_WORKING
         session.message = "正在验证…"
@@ -361,18 +409,17 @@ class ManualCookie:
 
         if self.uid_cookie and not uid:
             session.state = S_FAILED
-            session.message = ("Cookie 里没有 `%s`，认不出你的用户 ID。"
-                               "重新复制一次**登录后**的完整 Cookie，"
-                               "或者在上面的输入框里把 ID 直接填上。"
+            session.message = ("没填 `%s`，认不出你的用户 ID。"
+                               "它在你的主页地址里，形如 luogu.com.cn/user/123456。"
                                % self.uid_cookie)
             return session
 
         session.cookies = cookies
         if uid:
             session.ctx["handle"] = uid
-        # 把"识别到了哪些字段"说出来 —— 页面只回这一句话，
-        # 用户看不见解析结果的话，少贴一段就只能靠猜（值本身绝不回显）
-        session.message = "%s（解析到 %d 个字段：%s）" % (
+        # 把"用到了哪几个字段"说出来 —— 页面只回这一句话，
+        # 用户看不见结果的话，少填一个就只能靠猜（值本身绝不回显）
+        session.message = "%s（用到 %d 个 cookie：%s）" % (
             session.message, len(cookies), "、".join(sorted(cookies)))
         session.state = S_OK
         return session
@@ -395,8 +442,10 @@ class EitherOf:
     cookie_path: Any = None
 
     async def start(self, svc, session: Session, fields: dict) -> Session:
-        raw = str(fields.get("cookies") or fields.get("cookie") or "").strip()
-        if raw and self.cookie_path is not None:
+        # 判断依据：Cookie 那几个框里有没有填东西。填了就走 Cookie 那条路。
+        names = tuple(getattr(self.cookie_path, "cookie_names", ()) or ())
+        if self.cookie_path is not None and any(
+                str(fields.get(n) or "").strip() for n in names):
             return await self.cookie_path.start(svc, session, fields)
         return await self.primary.start(svc, session, fields)
 
@@ -652,11 +701,16 @@ def default_authenticators() -> dict:
         "atcoder": HandleOnly(platform="atcoder", fetcher=atc_fetch),
         "qoj": EitherOf(
             primary=QojLogin(),
-            # QOJ 的用户名就藏在 uoj_username 这个 cookie 里；取不到就报错，
-            # 不能留一个空的 qoj_uid —— 那会让自动同步漏掉这个人
-            cookie_path=ManualCookie(platform="qoj", uid_cookie="uoj_username",
+            # 两个都得填：__client_id 是会话，uoj_username 是用户名。
+            # 用户名不能省 —— 它是 qoj_uid 的来源，空了自动同步会漏掉这个人
+            cookie_path=ManualCookie(platform="qoj",
+                                     required=("__client_id", "uoj_username"),
+                                     uid_cookie="uoj_username",
                                      verifier=qoj_verify),
         ),
-        "luogu": ManualCookie(platform="luogu", required=("__client_id",),
+        # 洛谷的 _uid 既是 cookie 也是用户 id，一填两用；
+        # C3VK 不列在这里 —— 那是 CDN 挑战 cookie，5 分钟过期，http.py 自己会解
+        "luogu": ManualCookie(platform="luogu",
+                              required=("__client_id", "_uid"),
                               uid_cookie="_uid", verifier=luogu_verify),
     }

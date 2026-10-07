@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 import tempfile
 
@@ -446,32 +447,53 @@ def test_manual_cookie():
 
     async def main():
         db, store, svc, _ = await setup()
-        # 换掉洛谷的 verifier
+        # 一个必填 + 一个选填 —— 把 optional 那条分支也走到
         async def ok_verify(cookies, client):
             return True, "验证通过"
-        svc._auth["luogu"] = accm.ManualCookie(platform="luogu",
-                                               verifier=ok_verify)
+        svc._auth["luogu"] = accm.ManualCookie(
+            platform="luogu", required=("__client_id",),
+            optional=("_uid",), verifier=ok_verify)
 
-        snap = await svc.start_login("qq1001", "luogu",
-                                     {"cookies": "C3VK=abc; __client_id=xyz"})
+        snap = await svc.start_login(
+            "qq1001", "luogu", {"__client_id": "xyz", "_uid": "123456"})
         check("导入成功", snap["state"] == "ok", snap["message"])
         ck = await store.get_credentials("qq1001", "luogu")
-        check("凭据落库", ck.get("C3VK") == "abc", repr(ck)[:80])
+        check("凭据落库", ck.get("__client_id") == "xyz", repr(ck)[:80])
+        check("选填的字段填了就存", ck.get("_uid") == "123456", repr(ck)[:80])
 
-        # 空输入
-        snap2 = await svc.start_login("qq1001", "luogu", {"cookies": ""})
+        # 选填的没填 → 不塞空值进库
+        await svc.start_login("qq1002", "luogu", {"__client_id": "only"})
+        ck2 = await store.get_credentials("qq1002", "luogu")
+        check("选填的没填就不往库里塞空串",
+              ck2 == {"__client_id": "only"}, repr(ck2)[:80])
+
+        # 必填漏了 → 点名
+        snap15 = await svc.start_login("qq1003", "luogu", {"_uid": "1"})
+        check("漏必填时点名", snap15["state"] == "failed"
+              and "__client_id" in snap15["message"], snap15["message"])
+
+        # 一个框都不填 —— 有必填项时报的是缺哪个
+        snap2 = await svc.start_login("qq1004", "luogu", {})
         check("空输入时失败", snap2["state"] == "failed", snap2["message"])
-        check("说明里给了格式提示", "名字=值" in snap2["message"], snap2["message"])
+        check("说明里点名缺的字段", "__client_id" in snap2["message"],
+              snap2["message"])
+
+        # 全是选填的平台：一个都不填时说"一个 cookie 都没填"
+        svc._auth["luogu"] = accm.ManualCookie(
+            platform="luogu", optional=("a",), verifier=ok_verify)
+        snap25 = await svc.start_login("qq1005", "luogu", {})
+        check("没有必填项时说明里说清一个都没填",
+              "一个 cookie 都没填" in snap25["message"], snap25["message"])
 
         # 验证不通过
         async def bad_verify(cookies, client):
             return False, "这段 Cookie 用不了"
-        svc._auth["luogu"] = accm.ManualCookie(platform="luogu",
-                                               verifier=bad_verify)
-        snap3 = await svc.start_login("qq1002", "luogu", {"cookies": "a=b"})
+        svc._auth["luogu"] = accm.ManualCookie(
+            platform="luogu", required=("__client_id",), verifier=bad_verify)
+        snap3 = await svc.start_login("qq1006", "luogu", {"__client_id": "a"})
         check("验证不过时失败", snap3["state"] == "failed", snap3["message"])
         check("验证不过时不落库",
-              await store.get_credentials("qq1002", "luogu") == {})
+              await store.get_credentials("qq1006", "luogu") == {})
 
         await db.close()
 
@@ -541,6 +563,31 @@ def test_cancel():
     asyncio.run(main())
 
 
+def _page_fields() -> dict:
+    """从 pages/accounts/app.js 里抠出每个平台的表单字段名。
+
+    页面是手写的 JS，后端是 Python —— 两边各写一份 cookie 名字，
+    很容易改了一边忘了另一边（用户填了框，后端根本不看）。
+    这个函数让测试能把两边对一遍。
+    """
+    path = os.path.join(HERE, "..", "pages", "accounts", "app.js")
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    try:
+        body = src.split("var PLATFORMS = [", 1)[1].split("\n  ];", 1)[0]
+    except IndexError:
+        return {}
+    out: dict = {}
+    cur = None
+    for m in re.finditer(r'id:\s*"(\w+)"|k:\s*"([^"]+)"', body):
+        if m.group(1):
+            cur = m.group(1)
+            out[cur] = []
+        elif cur:
+            out[cur].append(m.group(2))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 10. 绑完得显示"已绑定"（真机反馈：CF / AtCoder 绑完还是未绑定）
 # ---------------------------------------------------------------------------
@@ -595,45 +642,83 @@ def test_bound_status():
         luogu_auth = auths["luogu"]
         check("洛谷的认证器认得 _uid（认不出来同步就是死的）",
               getattr(luogu_auth, "uid_cookie", "") == "_uid", repr(luogu_auth))
-        check("洛谷要求 __client_id 这个关键字段",
-              "__client_id" in tuple(getattr(luogu_auth, "required", ())),
+        check("洛谷要求 __client_id 和 _uid 两个字段",
+              tuple(getattr(luogu_auth, "required", ())) == ("__client_id", "_uid"),
               repr(getattr(luogu_auth, "required", ())))
+        check("洛谷不要求填 C3VK（那是 CDN 挑战 cookie，http.py 自己会解）",
+              "C3VK" not in tuple(getattr(luogu_auth, "cookie_names", ())),
+              repr(getattr(luogu_auth, "cookie_names", ())))
         luogu_auth.verifier = ok_verify     # 只换验证器，其余配置留真的
         svc._auth["luogu"].verifier = ok_verify
 
-        r = await svc.start_login(
-            "qq1001", "luogu",
-            {"cookies": "C3VK=abc; __client_id=xyz; _uid=123456"})
-        check("洛谷导入成功", r["state"] == "ok", r["message"])
-        check("洛谷 uid 从 _uid 里认出来了",
+        # 一个 cookie 一个框
+        r = await svc.start_login("qq1001", "luogu",
+                                  {"__client_id": "xyz", "_uid": "123456"})
+        check("洛谷按字段导入成功", r["state"] == "ok", r["message"])
+        check("洛谷 uid 从 _uid 框里认出来了",
               await store.get_handle("qq1001", "luogu") == "123456",
               await store.get_handle("qq1001", "luogu"))
-        check("回话里说了识别到哪些字段",
-              "解析到 3 个字段" in r["message"], r["message"])
-        check("回话里**没有**回显 cookie 的值", "abc" not in r["message"], r["message"])
+        check("回话里说了用到哪几个 cookie",
+              "用到 2 个 cookie" in r["message"], r["message"])
+        check("回话里**没有**回显 cookie 的值", "xyz" not in r["message"], r["message"])
+        check("存下来的凭据就是那两个字段",
+              await store.get_credentials("qq1001", "luogu")
+              == {"__client_id": "xyz", "_uid": "123456"},
+              repr(await store.get_credentials("qq1001", "luogu")))
         plat3 = {p["platform"]: p for p in (await svc.status("qq1001"))["platforms"]}
         check("洛谷页面显示已绑定",
               plat3["luogu"]["status"] == "valid", plat3["luogu"]["status"])
 
-        # 手填的 uid 优先于 cookie 里的
-        await svc.start_login("qq2002", "luogu",
-                              {"cookies": "__client_id=xyz; _uid=999",
-                               "handle": "111"})
-        check("手填的 uid 优先",
-              await store.get_handle("qq2002", "luogu") == "111",
-              await store.get_handle("qq2002", "luogu"))
-
-        # 认不出 uid 就**失败**，不能报了成功然后同步不了
-        r3 = await svc.start_login("qq3003", "luogu", {"cookies": "__client_id=xyz"})
-        check("认不出 uid 时失败", r3["state"] == "failed", r3["message"])
-        check("失败时说清缺哪个 cookie", "_uid" in r3["message"], r3["message"])
+        # 少填一个就点名，不能含糊
+        r3 = await svc.start_login("qq3003", "luogu", {"__client_id": "xyz"})
+        check("只填了 __client_id 时失败", r3["state"] == "failed", r3["message"])
+        check("失败时点名 _uid", "_uid" in r3["message"], r3["message"])
         check("失败时不落库", await store.get_credentials("qq3003", "luogu") == {})
-
-        # 少贴一段也要点名
-        r4 = await svc.start_login("qq4004", "luogu", {"cookies": "C3VK=abc"})
-        check("缺关键字段时点名 __client_id",
+        r4 = await svc.start_login("qq4004", "luogu", {"_uid": "123"})
+        check("只填了 _uid 时点名 __client_id",
               r4["state"] == "failed" and "__client_id" in r4["message"],
               r4["message"])
+        check("一个都不填时也说清楚",
+              (await svc.start_login("qq5005", "luogu", {}))["state"] == "failed")
+
+        # 容忍三种填法：值 / 名字=值 / 整条 Cookie 串
+        for who, fields in (
+                ("qq6006", {"__client_id": "__client_id=full", "_uid": "8"}),
+                ("qq7007", {"__client_id": "a=b; __client_id=spill; _uid=9"}),
+                ("qq8008", {"__client_id": "justvalue", "_uid": "_uid=10"}),
+        ):
+            rr = await svc.start_login(who, "luogu", fields)
+            check("容忍填法 %s" % who, rr["state"] == "ok", rr["message"])
+        check("名字=值 会被剥掉前缀",
+              (await store.get_credentials("qq6006", "luogu"))["__client_id"] == "full",
+              repr(await store.get_credentials("qq6006", "luogu")))
+        check("整条粘进来会从里面捞（包括别的框）",
+              await store.get_handle("qq7007", "luogu") == "9",
+              await store.get_handle("qq7007", "luogu"))
+        check("裸值原样存",
+              (await store.get_credentials("qq8008", "luogu"))["__client_id"]
+              == "justvalue")
+
+        # 换行注入还是得挡（值的最后一道闸门在 http.py，这里先挡）
+        bad = await svc.start_login(
+            "qq9009", "luogu", {"__client_id": "ok\r\nX-Injected: 1", "_uid": "1"})
+        check("带换行的值被拒", bad["state"] == "failed", bad["message"])
+
+        # --- 页面上的字段必须和后端认的名字一致，否则用户填了也没人读
+        page = _page_fields()
+        for pf in ("qoj", "luogu"):
+            a = auths[pf]
+            cp = a.cookie_path if isinstance(a, accm.EitherOf) else a
+            names = set(cp.cookie_names)
+            have = set(page.get(pf, ()))
+            check("%s：页面上的 cookie 框和后端认的名字一致（%s）"
+                  % (pf, "、".join(sorted(names))), names <= have,
+                  "页面字段 %r" % sorted(have))
+            leftovers = have - names - {"username", "password", "handle"}
+            check("%s：页面上没有后端不认的字段" % pf, not leftovers,
+                  "多余字段 %r" % sorted(leftovers))
+        check("洛谷页面上不再有那个大 Cookie 框",
+              "cookies" not in set(page.get("luogu", ())), repr(page.get("luogu")))
 
         await db.close()
 
@@ -661,20 +746,31 @@ def test_either_of():
             return True, "验证通过，拉到 2 条记录"
         auth.cookie_path.verifier = ok_verify
 
-        r = await svc.start_login(
-            "qq1001", "qoj", {"cookies": "uoj_username=alice; __client_id=x"})
-        check("贴了 cookie 就走 cookie 那条路", r["state"] == "ok", r["message"])
+        r = await svc.start_login("qq1001", "qoj",
+                                  {"__client_id": "x", "uoj_username": "alice"})
+        check("填了 cookie 就走 cookie 那条路", r["state"] == "ok", r["message"])
         check("QOJ 用户名落成 qoj_uid",
               await store.get_handle("qq1001", "qoj") == "alice",
               await store.get_handle("qq1001", "qoj"))
         check("QOJ 凭据落库",
               (await store.get_credentials("qq1001", "qoj")).get("__client_id") == "x")
 
-        # 不贴 cookie → 仍然走原来的密码路
+        # 只填一半也算走了 cookie 那条路，然后点名缺什么
+        r15 = await svc.start_login("qq1501", "qoj", {"__client_id": "x"})
+        check("只填一个 cookie 时点名 uoj_username",
+              r15["state"] == "failed" and "uoj_username" in r15["message"],
+              r15["message"])
+
+        # 一个 cookie 框都不填 → 仍然走原来的密码路
         r2 = await svc.start_login("qq2002", "qoj", {"username": "", "password": ""})
-        check("没贴 cookie 时走密码路（报用户名密码没填）",
+        check("没填 cookie 时走密码路（报用户名密码没填）",
               r2["state"] == "failed" and r2["message"] == "用户名和密码都要填",
               r2["message"])
+
+        # 只填用户名、不填密码：还是密码路，不能因为漏填就走了别的路
+        r3 = await svc.start_login("qq3003", "qoj", {"username": "alice"})
+        check("只填用户名时仍报密码没填",
+              r3["message"] == "用户名和密码都要填", r3["message"])
 
         await db.close()
 

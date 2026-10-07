@@ -193,29 +193,33 @@
     },
     {
       id: "qoj", name: "QOJ",
-      note: "两条路选一条：填用户名和密码登录（账号开了两步验证的话，"
-          + "提交后会再要一次验证码），**或者**只贴 Cookie —— "
-          + "先在自己的浏览器里登录 QOJ，从开发者工具里把 Cookie 复制过来。"
-          + "QOJ 没有第三方登录可跳，贴 Cookie 就是那个\"不用输密码\"的办法。",
+      note: "两条路选一条。填用户名和密码登录（账号开了两步验证的话，"
+          + "提交后会再要一次验证码）；**或者**把下面两个 Cookie 填上 —— "
+          + "先在自己的浏览器里登录 QOJ，从开发者工具的 Application → "
+          + "Cookies 里把这两个的名字和值抄过来，这样密码一次都不用"
+          + "经过这台服务器。QOJ 没有第三方登录可跳，填 Cookie 就是"
+          + "那个\"不用输密码\"的办法。两条路只要有一条填了就行。",
       fields: [
         { k: "username", label: "用户名", ph: "", type: "text" },
         { k: "password", label: "密码", ph: "", type: "password" },
-        { k: "cookies", label: "Cookie（走这条路就不用填密码）",
-          ph: "uoj_username=...; __client_id=...",
-          type: "textarea", wide: true }
+        { k: "__client_id", label: "Cookie：__client_id",
+          ph: "会话 id，一长串", type: "textarea", wide: true },
+        { k: "uoj_username", label: "Cookie：uoj_username",
+          ph: "就是你的 QOJ 用户名", type: "text" }
       ]
     },
     {
       id: "luogu", name: "洛谷",
-      note: "需要登录。站点有 CDN 反爬，自动登录还没打通 —— "
-          + "请在浏览器里登录洛谷后，把 Cookie **整条**复制进来"
-          + "（不用拆开，格式是 `名字=值; 名字=值`）。"
-          + "用户 ID 能从 Cookie 里的 _uid 自动认出来；认不出就得手填，"
-          + "它在你的洛谷主页地址里，形如 luogu.com.cn/user/123456。",
+      note: "需要登录。洛谷的自动登录还没打通（被 CDN 的第二层挑战页挡住），"
+          + "只能在浏览器里登录洛谷之后，从开发者工具的 Application → "
+          + "Cookies 里把下面这两个抄过来，一个框填一个，不用自己拼分号。"
+          + "_uid 就是你的用户 ID，它在你的洛谷主页地址里，"
+          + "形如 luogu.com.cn/user/123456。"
+          + "C3VK 不用填 —— 那个 5 分钟就过期，插件自己会解。",
       fields: [
-        { k: "cookies", label: "Cookie", ph: "C3VK=...; __client_id=...; _uid=...",
-          type: "textarea", wide: true },
-        { k: "handle", label: "用户 ID（可留空，默认从 Cookie 的 _uid 取）",
+        { k: "__client_id", label: "Cookie：__client_id",
+          ph: "会话 id，一长串", type: "textarea", wide: true },
+        { k: "_uid", label: "Cookie：_uid（你的用户 ID）",
           ph: "例如 123456", type: "text" }
       ]
     }
