@@ -50,8 +50,41 @@ _CONTEXT_RE = re.compile(
 # 标签表（ID → 名字）。`window.__luoguTagRequest = '/_lfe/tags'`
 _TAG_URL = ORIGIN + "/_lfe/tags"
 
-# 「Welcome - Luogu Spilopelia」= 第二层挑战页，不是登录表单
+# 「Welcome - Luogu Spilopelia」曾经被我当成"第二层挑战页"的特征。
+#
+# ⚠️ **那是误判（2026-10-08 实测）**：这个标题是洛谷 SPA 外壳对
+# `record.list` 这类模板渲染的**默认标题**，正常的记录页也长这样。
+#     正常记录页：17097 字节，带 `lentille-context`，`data.records.count = 733`
+#     真风控页：  ~3027 字节，**没有** `lentille-context`
+# 光看标题会把整页好数据丢掉 —— 洛谷同步因此一条都拉不到，
+# 还报成"被第二层挑战页挡住"，看着像风控，其实是自己的判据错了。
 _WELCOME_RE = re.compile(r"(?i)<title>\s*Welcome\s*-\s*Luogu", re.I)
+
+
+def _context_payload(html: str) -> dict | None:
+    """把 `<script id="lentille-context">` 里的 JSON 解出来。
+
+    洛谷所有 `_contentOnly` 响应都把数据塞在这个容器里：
+    题面是 `data.problem`，记录页是 `data.records`。
+    """
+    m = _CONTEXT_RE.search(html or "")
+    if not m:
+        return None
+    try:
+        payload = json.loads(m.group(1))
+    except (ValueError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _blocked(html: str) -> bool:
+    """是不是被洛谷的风控页挡了。
+
+    **有 `lentille-context` 就是真页面**，标题不算数（理由见 `_WELCOME_RE`）。
+    """
+    if _CONTEXT_RE.search(html or ""):
+        return False
+    return bool(_WELCOME_RE.search((html or "")[:4000]))
 
 
 class Luogu:
@@ -90,14 +123,8 @@ class Luogu:
         分开成静态方法是为了**能离线测** —— 不用联网就能验证解析对不对。
         返回 `None` 表示认不出结构（页面改版或不是题面页）。
         """
-        m = _CONTEXT_RE.search(html or "")
-        if not m:
-            return None
-        try:
-            payload = json.loads(m.group(1))
-        except (ValueError, TypeError):
-            return None
-        if not isinstance(payload, dict):
+        payload = _context_payload(html)
+        if payload is None:
             return None
         problem = ((payload.get("data") or {}).get("problem")) or {}
         if not isinstance(problem, dict) or not problem:
@@ -190,9 +217,9 @@ class Luogu:
         if not pid:
             return Fetched(ok=False, error_kind="内部错误", detail="没给题号")
         resp = await client.get("%s/problem/%s?_contentOnly=1" % (ORIGIN, pid))
-        if _WELCOME_RE.search(resp.text[:1000]):
+        if _blocked(resp.text):
             return Fetched(ok=False, error_kind="挑战未过",
-                           detail="被第二层挑战页挡住（C3VK 已过但还不够）")
+                           detail="被风控页挡住（C3VK 已过但还不够）")
         if resp.status == 401:
             return Fetched(ok=False, error_kind="凭据失效",
                            detail="需要登录（HTTP 401）")
@@ -229,9 +256,13 @@ class Luogu:
     async def login(self, username: str, password: str, client) -> Fetched:
         """洛谷的登录**还没打通**，这里如实说明，不假装成功。
 
-        现状：过了 C3VK 之后 `/auth/login` 返回 3027 字节的
-        `Welcome - Luogu Spilopelia`，不是登录表单 —— 说明还有一层
-        我没识别出来的门（可能是另一个 cookie、或者需要先访问预热页）。
+        现状：`POST /auth/login` 拿回来的不是登录表单，而是一个
+        `Welcome - Luogu Spilopelia` 外壳页 —— 说明还有一层我没看懂的
+        门（可能是另一个 cookie、或者需要先访问预热页）。
+
+        ⚠️ 别把这个标题当成风控特征：它同时是**正常页面**的默认标题
+        （见 `_WELCOME_RE` 上方那段），所以"看到 Welcome 就是被挡了"
+        这个判据是错的，只在**没有 `lentille-context`** 时才成立。
 
         所以现阶段洛谷走**手动导入 Cookie**（`/credentials` 接口）：
         用户在浏览器里登录后复制 Cookie 贴进来。
@@ -239,63 +270,103 @@ class Luogu:
         """
         return Fetched(
             ok=False, error_kind="挑战未过",
-            detail=("洛谷自动登录还没打通（第二层挑战页未识别）。"
+            detail=("洛谷自动登录没打通（POST /auth/login 返回的不是登录表单）。"
                     "请用「手动导入 Cookie」：浏览器登录洛谷后，"
                     "从开发者工具里复制 Cookie 贴到插件页面。"))
 
-    # ---- 提交（需登录）--------------------------------------------------
+    # 洛谷记录页一页固定 20 条（`perPage` 不可调）。第一次同步要能拉全
+    # 历史，所以页数给足；之后带了 `since_epoch` 就会在第一页提前收工。
+    _MAX_PAGES = 40
+
     async def fetch_submissions(self, uid: str, since_epoch: int | None = None,
                                 client=None) -> Fetched:
+        """拉提交记录。
+
+        实测（2026-10-08，带真 Cookie 从服务器发起）：
+            `GET /record/list?user=<uid>&page=N&_contentOnly=1`
+            → 200 / 17097 字节，数据在 `lentille-context` 里：
+                {"records": {"perPage": 20, "count": 733, "result": [...]}}
+            列表**从新到旧**排；`count=733` + `perPage=20` → 共 37 页。
+
+        以前这里有三个 bug 叠在一起（详见 `_WELCOME_RE` 上方的注释）：
+        `_WELCOME_RE` 把正常页误判成风控页、`self._extract_json` 这个方法
+        压根不存在、JSON 路径写成了 `currentData.records.result`。后两个
+        被第一个挡住了，所以一直没暴露 —— 表现是"一条都同步不到"。
+        """
         if not client or not client.cookies:
             return Fetched(ok=False, error_kind="凭据失效",
                            detail="洛谷需要登录（或导入 Cookie）才能看提交记录")
         if not uid:
             return Fetched(ok=False, error_kind="凭据失效", detail="没填洛谷 uid")
 
-        resp = await client.get("%s/record/list?user=%s&_contentOnly=1" % (ORIGIN, uid))
-        if resp.status == 401:
-            return Fetched(ok=False, error_kind="凭据失效",
-                           detail="Cookie 已失效（HTTP 401），请重新导入")
-        if _WELCOME_RE.search(resp.text[:1000]):
-            return Fetched(ok=False, error_kind="挑战未过",
-                           detail="被第二层挑战页挡住")
-        if not resp:
-            return Fetched(ok=False, error_kind="网络不可达",
-                           detail="HTTP %d" % resp.status)
+        out: list[Submission] = []
+        truncated = False
 
-        data = self._extract_json(resp.text)
-        if not isinstance(data, dict):
-            return Fetched(ok=False, error_kind="页面结构变化",
-                           detail="记录页里找不到内嵌 JSON")
+        for page in range(1, self._MAX_PAGES + 1):
+            resp = await client.get(
+                "%s/record/list?user=%s&page=%d&_contentOnly=1"
+                % (ORIGIN, uid, page))
+            if resp.status == 401:
+                return Fetched(ok=False, error_kind="凭据失效",
+                               detail="Cookie 已失效（HTTP 401），请重新导入")
+            if _blocked(resp.text):
+                return Fetched(ok=False, error_kind="挑战未过",
+                               detail="被风控页挡住")
+            if not resp:
+                return Fetched(ok=False, error_kind="网络不可达",
+                               detail="HTTP %d" % resp.status)
 
-        records = ((data.get("currentData") or {}).get("records")) or {}
-        rows = records.get("result") if isinstance(records, dict) else None
-        if not isinstance(rows, list):
-            return Fetched(ok=False, error_kind="页面结构变化",
-                           detail="JSON 结构变了（找不到 records.result）")
+            records = ((_context_payload(resp.text) or {}).get("data")
+                       or {}).get("records")
+            if not isinstance(records, dict):
+                return Fetched(ok=False, error_kind="页面结构变化",
+                               detail="记录页里找不到 data.records（洛谷改版了？）")
+            rows = records.get("result")
+            if not isinstance(rows, list):
+                return Fetched(ok=False, error_kind="页面结构变化",
+                               detail="JSON 结构变了（找不到 records.result）")
+            if not rows:
+                break
 
-        out = []
-        for r in rows:
-            prob = r.get("problem") or {}
-            pid = str(prob.get("pid") or "")
-            if not pid:
-                continue
-            diff = prob.get("difficulty")
-            try:
-                diff = int(diff) if diff is not None else None
-            except (TypeError, ValueError):
-                diff = None
-            out.append(Submission(
-                platform=self.name,
-                submission_id=str(r.get("id") or ""),
-                problem_key=self.problem_key(pid),
-                verdict=str(r.get("status") if r.get("status") is not None else ""),
-                epoch=int(r.get("submitTime") or 0),
-                language="",
-                difficulty=diff,
-                difficulty_source="luogu_level" if diff is not None else "unknown",
-            ))
-        return Fetched(items=out, ok=True)
+            reached_old = False
+            for r in rows:
+                prob = r.get("problem") or {}
+                pid = str(prob.get("pid") or "")
+                if not pid:
+                    continue
+                epoch = int(r.get("submitTime") or 0)
+                if since_epoch and epoch and epoch <= since_epoch:
+                    # 从新到旧排的，碰到旧于游标的就可以收工了
+                    reached_old = True
+                    continue
+                diff = prob.get("difficulty")
+                try:
+                    diff = int(diff) if diff is not None else None
+                except (TypeError, ValueError):
+                    diff = None
+                out.append(Submission(
+                    platform=self.name,
+                    submission_id=str(r.get("id") or ""),
+                    problem_key=self.problem_key(pid),
+                    verdict=str(r.get("status")
+                                if r.get("status") is not None else ""),
+                    epoch=epoch,
+                    language="",
+                    difficulty=diff,
+                    difficulty_source="luogu_level" if diff is not None
+                    else "unknown",
+                ))
+            if reached_old:
+                break
+
+            total = records.get("count")
+            per_page = records.get("perPage") or 20
+            if isinstance(total, int) and page * per_page >= total:
+                break                       # 已经是最后一页了
+        else:
+            truncated = True                # for 跑完没 break = 撞到页数上限
+
+        return Fetched(items=out, ok=True, truncated=truncated)
 
     async def fetch_contests(self, uid: str, client=None) -> Fetched:
         return Fetched(ok=False, error_kind="页面结构变化",

@@ -32,7 +32,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
-from platforms.luogu import Luogu, LEVEL_NAMES  # noqa: E402
+from platforms.luogu import Luogu, LEVEL_NAMES, _blocked  # noqa: E402
 from platforms.base import Fetched  # noqa: E402
 
 PASS = 0
@@ -103,7 +103,42 @@ TAGS_JSON = {
     "_locale": "zh-CN",
 }
 
+# ⚠️ 脏点 3（2026-10-08 才发现）：`Welcome - Luogu Spilopelia` **不是**风控页特征。
+#    它是洛谷 SPA 外壳对 `record.list` 这类模板渲染的**默认标题**，正常记录页
+#    也长这样 —— 实测正常记录页 17097 字节、带 lentille-context、733 条记录；
+#    真风控页 ~3027 字节且**没有** lentille-context。
+#    我原来只看标题就报"被第二层挑战页挡住"，结果洛谷同步一条都拉不到、
+#    还甩锅给"风控"。下面 `records_html()` 造的就是这种**标题一样但正常**的页。
 WELCOME_HTML = "<!DOCTYPE html><html><head><title>Welcome - Luogu Spilopelia</title>"
+
+
+def records_html(rows, count=733, per_page=20, uid=1823658):
+    """造一个**正常**的洛谷记录页 —— 结构照抄 2026-10-08 抓的真实响应。
+
+    关键脏点：标题是 `Welcome`（和风控页一模一样），但**带 lentille-context**，
+    数据在 `data.records.result`（不是 `currentData.records.result`）。
+    """
+    payload = {
+        "instance": "main",
+        "template": "record.list",
+        "status": 200,
+        "locale": "zh-CN",
+        "data": {"records": {"perPage": per_page, "count": count,
+                             "result": rows}},
+        "user": {"uid": uid, "name": "dsyfb437"},
+        "time": 1788592500,
+    }
+    return ('<!DOCTYPE html><html><head><title>Welcome - Luogu Spilopelia'
+            '</title></head><body>'
+            '<script id="lentille-context" type="application/json">'
+            + json.dumps(payload, ensure_ascii=False)
+            + "</script></body></html>")
+
+
+def row(sid, pid, epoch, status=12, diff=1):
+    """一条提交记录（字段名照抄真实响应：submitTime / problem.pid）。"""
+    return {"id": sid, "status": status, "submitTime": epoch,
+            "problem": {"pid": pid, "difficulty": diff}}
 
 
 class Resp:
@@ -306,6 +341,153 @@ def test_login_honest():
     asyncio.run(main())
 
 
+# ---------------------------------------------------------------------------
+# 6. 提交记录 —— 三个 bug 就藏在这儿，这节是它们以后翻不了身的保证
+# ---------------------------------------------------------------------------
+
+def test_fetch_submissions():
+    print("\n[6] fetch_submissions（三个 bug 的回归）")
+
+    async def main():
+        lg = Luogu()
+        CK = {"__client_id": "x", "_uid": "1823658"}
+
+        # --- 6.1 正常页：标题是 Welcome，但带 lentille-context → 必须认得出来
+        html = records_html([row(1, "P1001", 1788592435),
+                             row(2, "P3803", 1788592127)], count=2)
+        c = FakeClient({"/record/list": Resp(200, html)})
+        c.set_cookies(CK)
+        got = await lg.fetch_submissions("1823658", None, c)
+        check("★ 标题 Welcome + 有数据容器 → **不**该报风控",
+              got.ok, "%s / %s" % (got.error_kind, got.detail[:70]))
+        check("解析出 2 条", got.ok and len(got.items) == 2,
+              repr(len(got.items)) if got.ok else "")
+        check("★ 走的是 data.records.result（原来写的是 currentData）",
+              got.ok and got.items[0].problem_key == "LG:P1001",
+              got.items[0].problem_key if got.ok else "")
+        check("epoch 取自 submitTime",
+              got.ok and got.items[0].epoch == 1788592435,
+              repr(got.items[0].epoch) if got.ok else "")
+        check("难度带得出来",
+              got.ok and got.items[0].difficulty == 1,
+              repr(got.items[0].difficulty) if got.ok else "")
+        check("难度来源标 luogu_level",
+              got.ok and got.items[0].difficulty_source == "luogu_level", "")
+        check("verdict 是字符串（不是 None）",
+              got.ok and got.items[0].verdict == "12",
+              repr(got.items[0].verdict) if got.ok else "")
+
+        # --- 6.2 那个根本不存在的方法
+        check("★ 不再调用不存在的 self._extract_json",
+              not hasattr(Luogu, "_extract_json"))
+
+        # --- 6.3 真风控页：标题一样，但**没有**数据容器
+        check("_blocked：真风控页判 True", _blocked(WELCOME_HTML))
+        check("_blocked：正常记录页判 False", not _blocked(html))
+        c3 = FakeClient({"/record/list": Resp(200, WELCOME_HTML)})
+        c3.set_cookies(CK)
+        got3 = await lg.fetch_submissions("1823658", None, c3)
+        check("没容器 + Welcome 标题 = 挑战未过",
+              not got3.ok and got3.error_kind == "挑战未过",
+              "%s / %s" % (got3.error_kind, got3.detail[:50]))
+
+        # --- 6.4 有容器但结构变了 → 页面结构变化（不许猜，也不许当风控）
+        c4 = FakeClient({"/record/list": Resp(
+            200, records_html([]).replace('"records"', '"somethingElse"'))})
+        c4.set_cookies(CK)
+        got4 = await lg.fetch_submissions("1823658", None, c4)
+        check("结构变了报页面结构变化",
+              not got4.ok and got4.error_kind == "页面结构变化",
+              "%s / %s" % (got4.error_kind, got4.detail[:50]))
+
+        # --- 6.5 空结果 = 真的没有（ok=True、0 条），不是错误
+        c5 = FakeClient({"/record/list": Resp(200, records_html([], count=0))})
+        c5.set_cookies(CK)
+        got5 = await lg.fetch_submissions("1823658", None, c5)
+        check("空结果是 ok=True + 0 条（不是报错）",
+              got5.ok and got5.items == [],
+              "%s / %s" % (got5.error_kind, got5.detail[:50]))
+
+        # --- 6.6 401
+        c6 = FakeClient({"/record/list": Resp(401, "no")})
+        c6.set_cookies(CK)
+        got6 = await lg.fetch_submissions("1823658", None, c6)
+        check("401 报凭据失效", not got6.ok and got6.error_kind == "凭据失效",
+              got6.error_kind)
+
+        # --- 6.7 没 Cookie / 没 uid：直接拒绝，一个请求都不发
+        got7 = await lg.fetch_submissions("1823658", None, FakeClient({}))
+        check("没 Cookie 直接拒绝（不发请求）",
+              not got7.ok and got7.error_kind == "凭据失效", got7.error_kind)
+        c8 = FakeClient({})
+        c8.set_cookies(CK)
+        got8 = await lg.fetch_submissions("", None, c8)
+        check("没 uid 直接拒绝", not got8.ok and got8.error_kind == "凭据失效",
+              got8.error_kind)
+
+        # --- 6.8 ★ 分页：733 条要全拉回来，不能只拉第一页那 20 条
+        seen = []
+
+        def page_route(n, rows, count):
+            def f():
+                seen.append(n)
+                return Resp(200, records_html(rows, count=count))
+            return f
+
+        p1 = [row(i, "P1001", 1788590000 + i) for i in range(20)]
+        p2 = [row(100 + i, "P1001", 1788500000 + i) for i in range(20)]
+        p3 = [row(200 + i, "P1001", 1788400000 + i) for i in range(5)]
+        c9 = FakeClient({"page=1&": page_route(1, p1, 45),
+                         "page=2&": page_route(2, p2, 45),
+                         "page=3&": page_route(3, p3, 45)})
+        c9.set_cookies(CK)
+        got9 = await lg.fetch_submissions("1823658", None, c9)
+        check("★ 分页把 3 页 45 条全拉回来",
+              got9.ok and len(got9.items) == 45,
+              repr(len(got9.items)) if got9.ok
+              else "%s / %s" % (got9.error_kind, got9.detail[:50]))
+        check("正好请求 3 页（count=45 / perPage=20 就收）",
+              seen == [1, 2, 3], repr(seen))
+        check("没撞上限就不算截断", got9.truncated is False, repr(got9.truncated))
+
+        # --- 6.9 ★ 增量：带 since_epoch 时碰到旧的就收工，不白拉 37 页
+        seen2 = []
+
+        def page_route2():
+            seen2.append(1)
+            return Resp(200, records_html(
+                [row(1, "P1001", 1000), row(2, "P1001", 900),
+                 row(3, "P1001", 800), row(4, "P1001", 700)], count=733))
+
+        c10 = FakeClient({"page=1&": page_route2, "page=2&": page_route2})
+        c10.set_cookies(CK)
+        got10 = await lg.fetch_submissions("1823658", 850, c10)
+        check("★ 只取新于游标的（1000/900，丢掉 800/700）",
+              got10.ok and [i.epoch for i in got10.items] == [1000, 900],
+              repr([i.epoch for i in got10.items]) if got10.ok else "")
+        check("★ 碰到旧的就停，没再去拉第 2 页",
+              len(seen2) == 1, repr(len(seen2)))
+
+        # --- 6.10 撞到页数上限要如实标 truncated（别假装拉全了）
+        seen3 = []
+
+        def always():
+            seen3.append(1)
+            return Resp(200, records_html(
+                [row(1, "P1001", 1788592435) for _ in range(20)],
+                count=999999))
+
+        c11 = FakeClient({"/record/list": always})
+        c11.set_cookies(CK)
+        got11 = await lg.fetch_submissions("1823658", None, c11)
+        check("撞到 _MAX_PAGES 上限时 truncated=True",
+              got11.ok and got11.truncated is True, repr(got11.truncated))
+        check("也确实是拉满了 _MAX_PAGES 页",
+              len(seen3) == Luogu._MAX_PAGES, repr(len(seen3)))
+
+    asyncio.run(main())
+
+
 def main() -> int:
     print("=" * 62)
     print("洛谷适配器离线自测")
@@ -315,6 +497,7 @@ def main() -> int:
     test_fetch_problem()
     test_levels()
     test_login_honest()
+    test_fetch_submissions()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)
