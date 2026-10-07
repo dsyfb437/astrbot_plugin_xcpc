@@ -1167,10 +1167,63 @@ def review_kpis(review_dir: str) -> dict:
 # --------------------------------------------------------------------------
 # 后端 1：直接读写工作区文件
 # --------------------------------------------------------------------------
+#: 新建工作区时要补的几个文件（**只补缺的，绝不覆盖已有的**）。
+#:
+#: ⚠️ 这三段正文里刻意**不出现**顶格的 `##` 和任何 `- [ ]`：
+#: `parse_checklist` 的正则都是 `^` 锚定的，写了一行例子就等于凭空给用户
+#: 排出两条"今天的待办"。例子一律用 `>` 引用块包住（引用块不会被匹配），
+#: 这样文件里有能照抄的格式，机器人那边仍然是诚实的"没有任务"。
+_WS_README_SEED = """# 这个目录是插件自己建的
+
+不用管它也行 —— 机器人要的东西分两处：
+
+  * `xcpc.db`（在插件的数据目录里）—— 做题记录、比赛、题库、绑定凭据
+  * **这里** —— 复盘、随手记、题单、每日安排，都是纯 Markdown，你自己也能编辑
+
+```
+00-plan/lists/       题单（/xcpc 题单 读这里）
+00-plan/sprint.md    冲刺打卡，机器人按标题里的 MM/DD 找"今天"
+03-log/inbox.md      随手记（/xcpc 随手记 往这里追加）
+03-log/contests.csv  每写一篇复盘自动追加一行
+04-review/           复盘正文（/xcpc 复盘 写这里）
+data/  config/       旧版 file 后端读的资料，没有也不影响
+```
+
+想换地方：WebUI → 插件配置 → `workspace_root` 填绝对路径。留空就是这里。
+"""
+
+_WS_INBOX_SEED = """# 随手记
+
+在群里发 `/xcpc 随手记 <内容>` 会往这个文件追加，格式是 `## 时间` + 正文。
+
+（还没有记录）
+"""
+
+_WS_SPRINT_SEED = """# 冲刺打卡
+
+`/xcpc 今天` 读的就是这个文件。规则很简单：**标题里带 MM/DD 的那一组，
+就是那天**。格式照下面抄（把 `>` 去掉、换成你自己的内容）：
+
+> ## 10/08 周三
+>
+> - [ ] 一场 VP
+> - [ ] 补掉昨天那题的 D
+> - [x] 三道 1800
+
+勾选在手机上做（Obsidian、任意 Markdown 编辑器都行）—— 机器人只读不回写。
+
+现在这个文件里一条任务都没有，所以 `/xcpc 今天` 会说"没找到今天的安排"。
+要开始用，把上面的例子改成今天。
+"""
+
+
 class WorkspaceFS:
     """AstrBot 与 XCPC 工作区在**同一台机器**时用这个后端。
 
     读写的就是 ``xcpc/`` 目录本身，不需要 serve.py 在跑。
+
+    目录**由插件自己建**（见 :meth:`ensure`）—— 用户不需要先手工 mkdir
+    出 ``00-plan`` / ``03-log`` / ``04-review`` 再来填绝对路径。
     """
 
     backend_name = "file"
@@ -1178,6 +1231,38 @@ class WorkspaceFS:
     def __init__(self, root: str, handle: str = ""):
         self.root = os.path.abspath(os.path.expanduser(root))
         self.handle = handle
+
+    # ---- 初始化 ----
+    def ensure(self) -> str:
+        """把工作区骨架建出来（幂等）。返回根目录的绝对路径。
+
+        为什么要**插件**来建
+        --------------------
+        这个目录是插件的运行数据，不是用户的文档。原来的做法是
+        ``workspace_root`` 留空就抛「还没配置 workspace_root —— 去 WebUI 里
+        填上 xcpc 工作区的绝对路径」，等于要求用户先猜出插件内部约定的
+        ``00-plan`` / ``03-log`` / ``04-review`` 这几个名字、自己 mkdir 一遍、
+        再回来填。用户 2026-10-08 的原话：
+
+            这首先是个插件，插件应该建好这个目录吧。
+
+        所以现在：没配就落到 ``<插件数据目录>/workspace``，配了但目录不在
+        也照建。**已存在的文件一个字都不动**，只补缺的。
+
+        建目录失败（只读卷、没权限）时**把异常抛出去** —— 调用方要知道。
+        :meth:`status` 那些只读方法本来就容忍空目录，静默失败只会让用户
+        对着一堆空数据发呆，还查不出为什么。
+        """
+        for rel in ("00-plan/lists", "03-log", "04-review", "data", "config"):
+            os.makedirs(os.path.join(self.root, *rel.split("/")), exist_ok=True)
+        for rel, text in (("README.md", _WS_README_SEED),
+                          ("03-log/inbox.md", _WS_INBOX_SEED),
+                          ("00-plan/sprint.md", _WS_SPRINT_SEED)):
+            path = os.path.join(self.root, *rel.split("/"))
+            if not os.path.exists(path):
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+        return self.root
 
     # ---- 路径 ----
     @property

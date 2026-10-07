@@ -27,7 +27,7 @@
 | 每日推送 | 晚上推一条：比赛倒计时 + 今天没勾完的任务 + 复盘提醒 |
 | 题库标注 | 按难度、算法标签筛题，题号真假会校验 |
 | 账号绑定页 | AstrBot WebUI 里挂一个页面，扫码/验证码登录、手动导入 Cookie |
-| 自检 | `/xcpc 自检` 一次性告诉你哪里没配好，而不是等你踩到 |
+| 自检 | `/xcpc 自检` 一次性告诉你哪里没配好、怎么修，最后还按你的状态告诉你下一步发哪条指令 |
 
 它不是一个"再来一个刷题打卡 bot"。它假设你已经在用一个只有自己看得懂的备赛工作区
 （`00-plan/` 到 `04-review/` 那套目录），这个插件是那套东西的聊天入口。
@@ -49,8 +49,15 @@ git clone https://github.com/dsyfb437/astrbot_plugin_xcpc.git
 **没有需要手动装的 pip 依赖。** 核心逻辑只用 Python 标准库；`requirements.txt` 里那行
 `aiohttp` 只有走 `backend=http` 时才用得上，而 AstrBot 本体已经依赖它了。
 
-还需要配一个对话模型，`/xcpc 方案` 要用它。装完先在 QQ 里发 **`/xcpc 自检`**，
-它会逐项告诉你还缺什么。
+还需要配一个对话模型，`/xcpc 方案` 要用它。装完先在 QQ 里发 **`/xcpc 自检`**：
+它逐项告诉你还缺什么、怎么修，最后按你的状态列出**接下来该发哪几条指令**。
+
+**工作区不用你准备。** `workspace_root` 留空就行——插件会自己建一份
+（`<data_root>/workspace`，连 `00-plan/` `03-log/` `04-review/` 这些子目录都替你建好），
+只有想让它读写你已有的那份工作区时才填绝对路径。
+
+装完的正常顺序就四条：`绑定` → `同步` → `方案` → `订阅`。
+走到哪一步记不清了就再发一次 `自检`。
 
 ## 配置说明
 
@@ -71,8 +78,8 @@ git clone https://github.com/dsyfb437/astrbot_plugin_xcpc.git
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `backend` | `file` / `http` | `file` | `file` = 直接读写工作区文件，要求 AstrBot 和工作区在同一台机器；`http` = 调工作区里 `serve.py` 的接口，适合 AstrBot 在服务器上 |
-| `workspace_root` | 文本 | 空 | 工作区根目录的绝对路径，`backend=file` 时必填 |
-| `handle` | 文本 | 空 | 旧后端用的 Codeforces 用户名。留空的话那几个旧命令会直接告诉你去填，**不会猜一个** |
+| `workspace_root` | 文本 | 空 | 工作区根目录的绝对路径。**留空就行**——插件会自己在数据目录下建一个（`<data_root>/workspace`），子目录也替你建好，不用手工 mkdir，已存在的文件一个字都不会动。只有想读写你已有的那份工作区时才填 |
+| `handle` | 文本 | 空 | 旧后端用的 Codeforces 用户名。**留空不影响任何主流程**（绑定、同步、方案、打卡都不看它），只用来找工作区里 `data/<handle>_status.json` 这类旧版遗留资料 |
 | `http_base` | 文本 | `http://127.0.0.1:8787` | `backend=http` 时，复盘台地址 |
 | `http_token` | 文本 | 空 | `serve.py` 启动时打印的那个 4 位访问码 |
 | `http_timeout` | 整数 | `20` | HTTP 超时（秒）。复盘台跑 `/api/refresh` 时会比较慢 |

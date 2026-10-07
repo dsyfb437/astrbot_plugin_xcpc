@@ -55,13 +55,13 @@
     "description": "XCPC 工作区根目录（绝对路径）",
     "type": "string",
     "default": "",
-    "hint": "backend=file 时必填。例如 Windows: C:\\\\Users\\\\you\\\\Documents\\\\deepseek-harness\\\\default-workspace\\\\xcpc ｜ Linux: /home/you/xcpc"
+    "hint": "**留空就行** —— 插件会自己在数据目录下建一个（<数据目录>/workspace），连 00-plan / 03-log / 04-review 这些子目录都替你建好，不需要你手工 mkdir。只有想让它读写你已经有的那份 xcpc 工作区时才填绝对路径。例如 Windows: C:\\\\Users\\\\you\\\\Documents\\\\deepseek-harness\\\\default-workspace\\\\xcpc ｜ Linux: /home/you/xcpc"
   },
   "handle": {
-    "description": "Codeforces 用户名（旧 backend 用）",
+    "description": "Codeforces 用户名（可留空）",
     "type": "string",
     "default": "",
-    "hint": "只有 backend=file/http 时才用得上，用来找 data/<handle>_status.json 这类文件。留空的话那几个旧命令会明确告诉你去填，而不是猜一个。"
+    "hint": "**留空不影响任何主流程**（绑定、同步、方案、打卡都不看它）。它只用来找工作区里 data/<handle>_status.json 这种旧版遗留的资料，让 /xcpc 状态 多显示一点。想补就填你的 Codeforces 用户名。"
   },
   "http_base": {
     "description": "复盘台地址",

@@ -279,6 +279,178 @@ def test_render():
     check("合计行在", "合计" in text)
 
 
+# ---------------------------------------------------------------------------
+# 7. 「接下来做什么」——报告光说哪儿不对是不够的
+#
+# 用户 2026-10-08 的原话：「这个系统怎样运行的，我接下来该做什么，
+# 似乎没有很好的引导」。所以 suggest() 的每一条都必须是**能直接发出去的
+# 指令**，而不是"请检查配置"这种正确但没用的话。
+# ---------------------------------------------------------------------------
+
+def test_suggest():
+    print("\n[7] 接下来做什么")
+
+    s = scm.suggest()
+    check("什么都不传也有话说", len(s) >= 1, repr(s))
+    check("永远不超过三条", len(s) <= 3, "%d 条" % len(s))
+
+    # 地基坏了排最前 —— 工作区写不进去时，别的建议都是空中楼阁
+    s = scm.suggest(platforms=["codeforces"], submissions=733,
+                    workspace_ok=False, workspace_path="/nope/xcpc")
+    check("工作区坏了排第一条", "/nope/xcpc" in s[0], repr(s))
+    check("工作区坏了也说清楚可以留空", "留空" in s[0], repr(s))
+    check("工作区坏了也不超过三条", len(s) <= 3, repr(s))
+
+    # 没模型：必须说，而且不能同时喊他去发方案（发了也是报错）
+    # 注意判据是"没有一条**指令**是去发方案" —— 模型那条提示里本身会提到
+    # `/xcpc 方案`（"没有它 /xcpc 方案 出不来"），那是解释不是指令
+    s = scm.suggest(platforms=["codeforces"], submissions=1, model_ok=False)
+    check("没模型时说清楚", any("对话模型" in x for x in s), repr(s))
+    check("没模型时不叫他发方案",
+          not any(x.startswith("发 `/xcpc 方案`") for x in s), repr(s))
+
+    # 一个平台都没绑
+    s = scm.suggest(platforms=[], submissions=0)
+    check("没绑平台先让去绑定", any("/xcpc 绑定" in x for x in s), repr(s))
+    check("没绑平台时不提方案", not any("/xcpc 方案" in x for x in s), repr(s))
+
+    # 绑了但一条记录都没有 —— 这时候让他发方案是耍人
+    s = scm.suggest(platforms=["codeforces"], submissions=0)
+    check("绑了没数据让去同步", any("/xcpc 同步" in x for x in s), repr(s))
+    check("绑了没数据时不提方案", not any("/xcpc 方案" in x for x in s),
+          repr(s))
+
+    # 有数据了 —— 这才是该介绍"核心产物"的时候
+    s = scm.suggest(platforms=["codeforces", "luogu"], submissions=733)
+    check("有数据让去出方案", any("/xcpc 方案" in x for x in s), repr(s))
+    check("顺手提订阅", any("/xcpc 订阅" in x for x in s), repr(s))
+
+    # 订阅过了就别再喊订阅，改口讲日常
+    s = scm.suggest(platforms=["codeforces"], submissions=733,
+                    push_target=True)
+    check("订阅过就不再提订阅", not any("订阅" in x for x in s), repr(s))
+    check("改口说日常三条", any("日常" in x for x in s), repr(s))
+
+    # 推送时间要跟着配置走，不能写死 22:30
+    s = scm.suggest(platforms=["cf"], submissions=1, push_time="07:05")
+    check("推送时间用配置里的", any("07:05" in x for x in s), repr(s))
+
+    # 平台列表里有空串不该当成"绑过了"
+    s = scm.suggest(platforms=["", None], submissions=0)
+    check("空平台名不算绑过", any("/xcpc 绑定" in x for x in s), repr(s))
+
+
+# ---------------------------------------------------------------------------
+# 8. steps 在报告里的位置
+# ---------------------------------------------------------------------------
+
+def test_steps_render():
+    print("\n[8] 「接下来做什么」的排版")
+
+    r = scm.Report()
+    r.add("数据库", scm.OK, "已打开")
+    text = r.to_text()
+    check("没 steps 时不多印一段", "接下来做什么" not in text)
+
+    r.steps = ["发 /xcpc 绑定", "发 /xcpc 同步"]
+    text = r.to_text()
+    check("有 steps 时印出来", "接下来做什么" in text)
+    check("带序号", "1. 发 /xcpc 绑定" in text and "2. 发 /xcpc 同步" in text)
+    check("排在合计之后（先看结论再看行动）",
+          text.index("合计") < text.index("接下来做什么"), text)
+    check("ascii_safe 之后仍在（QQ 那边也看得到）",
+          "发 /xcpc 绑定" in scm.ascii_safe(text))
+
+
+# ---------------------------------------------------------------------------
+# 9. workspace_root 终于在自检里了
+#
+# 这是"引导缺失"最典型的洞：原来自检检了模型/路由/绑定/题库/数据库/日志，
+# 唯独不检工作区。用户跑完一片绿，然后 `/xcpc 今天` 一头撞上
+# 「还没配置 workspace_root」。
+# ---------------------------------------------------------------------------
+
+def test_workspace_check():
+    print("\n[9] 工作区检查")
+
+    async def main():
+        tmp, db, store, rec = await fresh()
+
+        # 没配 workspace_root → 退到 data_root 下的 workspace，而且**不建**
+        r = await scm.run(store=store, db=db, recorder=rec, context=FakeCtx(),
+                          config={"data_root": tmp}, data_root=tmp,
+                          user_id="qq1001")
+        ws = [i for i in r.items if i.name.startswith("工作区")]
+        check("有工作区这一项", len(ws) == 1, repr([i.name for i in r.items]))
+        check("默认位置判可写", ws[0].status == scm.OK, ws[0].detail)
+        check("默认位置就在 data_root 下面",
+              ws[0].detail == os.path.join(tmp, "workspace"), ws[0].detail)
+        check("自检**没**把目录建出来（自检不该有副作用）",
+              not os.path.exists(os.path.join(tmp, "workspace")))
+
+        # 配了但建不出来（父路径是个文件）→ BAD + 怎么修
+        blocker = os.path.join(tmp, "blocker")
+        with open(blocker, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        r2 = await scm.run(store=store, db=db, recorder=rec, context=FakeCtx(),
+                           config={"data_root": tmp}, data_root=tmp,
+                           user_id="qq1001",
+                           workspace_root=os.path.join(blocker, "ws"))
+        w2 = [i for i in r2.items if i.name.startswith("工作区")][0]
+        check("写不进去判 BAD", w2.status == scm.BAD, w2.status)
+        check("给了怎么修", "workspace_root" in w2.fix, w2.fix)
+        check("工作区坏了会挤进第一条建议",
+              any("工作区" in s for s in r2.steps), repr(r2.steps))
+
+        # http 后端不碰本地目录（工作区在别的机器上）
+        r3 = await scm.run(store=store, db=db, recorder=rec, context=FakeCtx(),
+                           config={"data_root": tmp}, user_id="qq1001",
+                           backend="http",
+                           workspace_root=os.path.join(tmp, "nope", "deep"))
+        w3 = [i for i in r3.items if i.name == "工作区"][0]
+        check("http 后端不查本地目录", w3.status == scm.OK, w3.detail)
+
+        # handle 没配只是 WARN —— 它只影响旧版遗留资料的显示
+        h = [i for i in r.items if i.name == "handle"][0]
+        check("handle 没配是 WARN 不是 BAD", h.status == scm.WARN, h.status)
+        check("handle 的说明强调不影响主流程", "不影响" in h.fix, h.fix)
+        check("http 后端不检 handle（那边没有本地遗留文件）",
+              not any(i.name == "handle" for i in r3.items),
+              repr([i.name for i in r3.items]))
+
+        # handle 配了就判 OK
+        r6 = await scm.run(store=store, db=db, recorder=rec, context=FakeCtx(),
+                           config={"data_root": tmp}, user_id="qq1001",
+                           handle="dsyfb_437")
+        h2 = [i for i in r6.items if i.name == "handle"][0]
+        check("handle 配了判 OK", h2.status == scm.OK, h2.detail)
+
+        # 每日推送开着但没订阅者 → WARN，并指到 /xcpc 订阅
+        p = [i for i in r3.items if i.name == "每日推送"][0]
+        check("推送没目标判 WARN", p.status == scm.WARN, p.status)
+        check("推送指到 /xcpc 订阅", "/xcpc 订阅" in p.fix, p.fix)
+
+        r4 = await scm.run(store=store, db=db, recorder=rec, context=FakeCtx(),
+                           config={"data_root": tmp}, user_id="qq1001",
+                           push_target=True)
+        p2 = [i for i in r4.items if i.name == "每日推送"][0]
+        check("有订阅者就判 OK", p2.status == scm.OK, p2.status)
+
+        # daily_push 关着就别说"没目标"
+        r5 = await scm.run(store=store, db=db, recorder=rec, context=FakeCtx(),
+                           config={"data_root": tmp, "daily_push": False},
+                           user_id="qq1001")
+        p3 = [i for i in r5.items if i.name == "每日推送"][0]
+        check("推送关着就判 OK", p3.status == scm.OK, p3.detail)
+
+        check("报告末尾一定带步骤", len(r3.steps) >= 1, repr(r3.steps))
+
+        await db.close()
+        rec.close()
+
+    asyncio.run(main())
+
+
 def main() -> int:
     print("=" * 62)
     print("core/selfcheck.py 自测")
@@ -289,6 +461,9 @@ def main() -> int:
     test_specific_judgments()
     test_writable_real()
     test_render()
+    test_suggest()
+    test_steps_render()
+    test_workspace_check()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

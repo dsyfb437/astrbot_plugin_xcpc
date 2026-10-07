@@ -231,9 +231,14 @@ HELP_MAIN = f"""XCPC 备赛助手
 指令都挂在 {CMD} 下面（这样才不会和别的插件撞名）。
 发 {CMD} 看全部子指令。
 
-【先做这个】
-  {CMD} 自检             装完先跑这个：哪儿不对、怎么修
-  {CMD} 绑定             拿绑定码（网页关联用）
+【五分钟上手】按这个顺序发，每一步都会告诉你下一步
+  1. {CMD} 绑定       拿绑定码，在网页上关联 Codeforces / AtCoder / 洛谷 / QOJ
+  2. {CMD} 同步       把做题记录拉下来（第一次要一两分钟）
+  3. {CMD} 方案       ← 核心产物：按你的记录排下一步练什么
+  4. {CMD} 订阅       之后每天自动推一条今日安排
+  走到哪一步记不清了，就发 {CMD} 自检 —— 它不只列出哪儿不对、怎么修，
+  最后还会按你的状态告诉你**下一步该发哪条指令**。
+  （工作区目录插件会自己建，你不用准备任何东西。）
 
 【数据】
   {CMD} 同步 [平台]      立即同步
@@ -264,9 +269,9 @@ HELP_MAIN = f"""XCPC 备赛助手
 看某一组细节：{CMD} 帮助 同步    {CMD} 帮助 绑定    {CMD} 帮助 日志
 
 ⚠️ 三个要知道的限制：
-  · QOJ 的提交记录**必须登录**才能看
+  · QOJ 的提交记录**必须登录**才能看（Cookie 可以整条贴，不用输密码）
   · AtCoder 走社区服务，且它的 API 里**没有算法标签**
-  · 洛谷要**手动导入 Cookie**（自动登录还没打通）
+  · 洛谷要**手动导入 Cookie**（自动登录还没打通），整条粘进去就行
   详见 {CMD} 帮助 同步"""
 
 #: 帮助的分组：用户发 `{CMD} 帮助 <词>` 时按这里查。
@@ -1138,34 +1143,49 @@ class XcpcPlugin(Star):
                     timeout=float(self.config.get("http_timeout", 20)),
                 )
             else:
-                root = self.config.get("workspace_root") or ""
-                if not root:
+                # 目录不存在就建出来 —— **不让用户先手工 mkdir 再回来填路径**。
+                fs = WorkspaceFS(root=self._workspace_root(),
+                                 handle=self._legacy_handle())
+                try:
+                    fs.ensure()
+                except OSError as exc:
                     raise RuntimeError(
-                        "还没配置 workspace_root —— 去 WebUI 的插件配置里填上 "
-                        "xcpc 工作区的绝对路径。")
-                self._backend = WorkspaceFS(
-                    root=root,
-                    handle=self._legacy_handle(),
-                )
+                        "工作区目录建不出来：%s\n（%s）\n"
+                        "去 WebUI 的插件配置里把 workspace_root 换成可写的位置，"
+                        "或者留空让插件用默认位置。" % (fs.root, exc))
+                self._backend = fs
         return self._backend
 
-    def _legacy_handle(self) -> str:
-        """旧 backend（file / http）要的 Codeforces 用户名。
+    def _workspace_root(self) -> str:
+        """工作区目录的绝对路径（只算路径，不碰磁盘）。
 
-        **拿不到就报错，不猜。**
+        没配 ``workspace_root`` 时**不再报错**，而是用插件数据目录下的
+        ``workspace/`` —— 这个目录是插件的运行数据，本来就该插件自己建。
+        用户 2026-10-08 的原话：「这首先是个插件，插件应该建好这个目录吧」。
 
-        这里原来是 `or "<某个写死的用户名>"` —— 那是个 bug：
-        别人装了插件、配置留空的话，会拿**别人的**用户名去找数据文件，
-        找不到还以为是自己的数据不存在。
+        为什么不直接落在工作区那个 ``xcpc/``：那是用户自己的文档目录。
+        AstrBot 跑在**服务器**上时根本碰不到它（碰得到的话就不需要 http
+        后端了），所以默认位置必须落在插件自己够得着的地方。
         """
-        h = str(self.config.get("handle") or "").strip()
-        if not h:
-            raise RuntimeError(
-                "还没配置 handle。\n"
-                "只有 backend = file / http 时才需要它 —— "
-                "去 WebUI 的插件配置里填上你的 Codeforces 用户名。\n"
-                "（用默认的新核心不需要，直接 /xcpc 绑定 就行。）")
-        return h
+        root = str(self.config.get("workspace_root") or "").strip()
+        if not root:
+            root = os.path.join(self._data_root(), "workspace")
+        return os.path.abspath(os.path.expanduser(root))
+
+    def _legacy_handle(self) -> str:
+        """旧 backend（file / http）要的 Codeforces 用户名。**没有就返回空串。**
+
+        这里原来写的是 `or "<某个写死的用户名>"` —— 那是个 bug：
+        别人装了插件、配置留空的话，会拿**别人的**用户名去找数据文件，
+        找不到还以为是自己的数据不存在。所以后来改成留空就抛异常。
+
+        但抛异常同样不对：这个值只用来找 ``data/<handle>_info.json`` 这类
+        **旧版遗留**文件，一个都没有时 :meth:`WorkspaceFS.status` 本来就会
+        干净地退化成零值。为了一个可选的美化去挡住整个 file 后端，等于把
+        插件内部约定泄漏给用户 —— 他只会看到"还没配置 handle"而完全不知道
+        这个 handle 是干嘛的。现在返回空串，缺什么由 ``/xcpc 自检`` 明说。
+        """
+        return str(self.config.get("handle") or "").strip()
 
     def _sender_allowed(self, event: AstrMessageEvent) -> bool:
         """白名单 + 管理员校验。
@@ -1588,6 +1608,20 @@ class XcpcPlugin(Star):
 
         root = self.backend.root
         tools = os.path.join(root, "02-tools")
+        # ⚠️ 这两条提前返回是**引导**，不是防御。工作区可能是插件刚自动建的
+        # 空壳（那就没有 02-tools），handle 也可能没配 —— 这两种情况下
+        # subprocess 会以看不懂的方式失败（"找不到 /…/cf_fetch.py"、
+        # 脚本收到空参数），而用户根本不知道这两个东西从哪来。
+        if not os.path.isdir(tools):
+            return ("这个工作区（%s）里没有 02-tools。\n"
+                    "`/xcpc 刷新` 跑的是工作区里那两个脚本，插件不自带。\n"
+                    "→ 要么把 workspace_root 指到真正的 xcpc 工作区，"
+                    "要么改用 `/xcpc 同步`（新核心，不依赖它们）。" % root)
+        if not self._legacy_handle():
+            return ("还没配 handle（Codeforces 用户名）—— "
+                    "`02-tools/cf_fetch.py` 需要这个参数。\n"
+                    "→ 去 WebUI 的插件配置里填上。\n"
+                    "（只是同步做题记录的话不需要它：发 `/xcpc 同步` 就行。）")
         handle = self._legacy_handle()
         env = dict(os.environ, PYTHONIOENCODING="utf-8")
         for script, label in (("cf_fetch.py", "抓取 CF 数据"),
@@ -2041,12 +2075,25 @@ class XcpcPlugin(Star):
         `/xcpc 方案` 失败是没模型还是没数据，每个都要猜。
         """
         uid = self._uid(event)
+        # 推送目标：/订阅 存下来的会话，或配置里手填的那一个。
+        # 取不到就当没有 —— 自检不该因为读订阅表失败而整段不跑。
+        try:
+            subs = await self._load_subscribers()
+        except Exception:                              # noqa: BLE001
+            subs = []
         try:
             report = await scm.run(
                 store=self.store, db=self.db, recorder=self.log,
                 context=self.context,
                 config=self.config,
                 data_root=self._data_root(),
+                # 让自检知道工作区落在哪、是哪种后端 —— 以前它只检数据目录，
+                # 于是 workspace_root 没配时自检全绿、/xcpc 今天 一撞就报错。
+                workspace_root=self._workspace_root(),
+                backend=(self.config.get("backend") or "file").lower(),
+                handle=self._legacy_handle(),
+                push_target=bool(subs)
+                            or bool(str(self.config.get("push_umo") or "").strip()),
                 umo=event.unified_msg_origin,
                 user_id=uid)
         except Exception as exc:                       # noqa: BLE001
