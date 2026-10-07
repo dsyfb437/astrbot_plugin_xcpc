@@ -21,23 +21,25 @@ import asyncio
 from dataclasses import dataclass, field
 
 from . import http as httpm
+from . import import_platform
 from . import log as logm
 from .store import Store
 
 # 平台适配器（延迟导入，避免没装的依赖影响别的平台）
+#
+# ⚠️ 这里**不能**写 `from platforms.codeforces import Codeforces`。
+# AstrBot 是按包加载的（`data.plugins.astrbot_plugin_xcpc.main`），
+# 那种情况下 `platforms` 不是顶层模块，这句会 ModuleNotFoundError —— 真机上炸过。
+# `import_platform()` 两种加载方式都认（见 core/__init__.py）。
 def _adapter(platform: str):
     if platform == "codeforces":
-        from platforms.codeforces import Codeforces
-        return Codeforces()
+        return import_platform("codeforces").Codeforces()
     if platform == "atcoder":
-        from platforms.atcoder import AtCoder
-        return AtCoder()
+        return import_platform("atcoder").AtCoder()
     if platform == "qoj":
-        from platforms.qoj import Qoj
-        return Qoj()
+        return import_platform("qoj").Qoj()
     if platform == "luogu":
-        from platforms.luogu import Luogu
-        return Luogu()
+        return import_platform("luogu").Luogu()
     raise ValueError("不认识的平台：%r" % platform)
 
 

@@ -658,8 +658,18 @@ class XcpcPlugin(Star):
         except accm.AccountError as exc:
             return {"error": str(exc), "user_id": user_id, "platforms": []}
         except Exception as exc:                        # noqa: BLE001
-            return {"error": "读状态失败：%s" % exc, "user_id": user_id,
-                    "platforms": []}
+            # ⚠️ 这里**必须留痕**。真机上出过一次「读状态失败：No module named
+            # 'platforms'」，日志里只有 `web.req ok .../status` —— 因为这条
+            # except 把异常吞成了 200 + error 字段，外层包装器看见的是"成功"，
+            # 于是看日志完全看不出哪里坏了。不要把异常消化得无声无息。
+            detail = traceback.format_exc()
+            if self.log:
+                self.log.event("status.fail", user_id=user_id, ok=False,
+                               error_kind="内部错误", detail=str(exc))
+            logger.error("[xcpc] 网页读状态失败: %s\n%s", exc, detail)
+            # 不带「读状态失败：」前缀 —— 页面那边已经加了一次，加两遍会变成
+            # 「读状态失败：读状态失败：...」。
+            return {"error": str(exc), "user_id": user_id, "platforms": []}
 
     async def account_login(self):
         """POST accounts/login —— `{platform, fields:{...}}`"""

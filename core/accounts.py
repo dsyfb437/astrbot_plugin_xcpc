@@ -34,6 +34,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import import_platform
 from . import log as logm
 
 # 会话多久没动作就作废（登录页开着忘了关的情况）
@@ -541,9 +542,15 @@ class AccountService:
 
 
 def default_authenticators() -> dict:
-    """四个平台的默认 authenticator。"""
-    from platforms.atcoder import AtCoder
-    from platforms.codeforces import Codeforces
+    """四个平台的默认 authenticator。
+
+    ⚠️ 平台适配器一律走 `import_platform()`，**不能**写
+    `from platforms.atcoder import AtCoder` —— AstrBot 按包加载插件时
+    `platforms` 不是顶层模块，真机上就是这里炸的（绑定页报
+    「读状态失败：No module named 'platforms'」）。见 core/__init__.py。
+    """
+    AtCoder = import_platform("atcoder").AtCoder
+    Codeforces = import_platform("codeforces").Codeforces
 
     cf = Codeforces()
     atc = AtCoder()
@@ -556,7 +563,7 @@ def default_authenticators() -> dict:
 
     async def luogu_verify(cookies, client):
         """洛谷：随便拉一个公开题目页，看会不会 401。"""
-        from platforms.luogu import Luogu
+        Luogu = import_platform("luogu").Luogu
         lg = Luogu()
         got = await lg.fetch_problem("P1001", client)
         if got.ok:
