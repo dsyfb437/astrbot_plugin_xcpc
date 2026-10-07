@@ -60,7 +60,7 @@ git clone https://github.com/dsyfb437/astrbot_plugin_xcpc.git
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `data_root` | 文本 | 空 | 数据库和日志放哪。留空 = 用插件自己的 `data/` 目录 |
+| `data_root` | 文本 | 空 | 数据库和日志放哪。留空 = 用 AstrBot 的 `data/plugin_data/astrbot_plugin_xcpc/`（**别填插件目录里的 `data/`**，更新插件时那个目录会被整个删掉，绑定和记录都会没） |
 | `log_level` | `info` / `debug` | `info` | `debug` 会记录每次 HTTP 请求（URL、状态码、耗时），凭据在那之前已经打码 |
 | `max_reply_chars` | 整数 | `900` | 单条回复最大字数，超了按行切成多条发 |
 | `list_preview` | 整数 | `5` | `/xcpc 题单` 每份显示几道 |
@@ -268,7 +268,9 @@ selftest.py        不依赖 AstrBot 的自测
 - **凭据不进日志，也不进 API 响应。** 日志层会对 `Cookie`、`Set-Cookie`、
   `password`、`_token` 打码；绑定页的接口返回由 `Session.public()` 兜底，
   不含 cookie / token / 密码。
-- 凭据只存在本地 SQLite 和 `auth/` 目录，不会进 git。
+- 凭据只存在本地 SQLite 的 `credentials` 表里，不会进 git。
+- **数据默认放在 AstrBot 的 `data/plugin_data/astrbot_plugin_xcpc/`**，不在插件目录里 —— 更新插件不会动它，不用重新绑定。
+  从旧版本（v0.5.3 及以前，数据在插件目录的 `data/`）升上来时，插件启动后会自动把它搬过去，只搬一次，不会覆盖已有的库。
 
 ## 常见问题
 
@@ -277,6 +279,22 @@ selftest.py        不依赖 AstrBot 的自测
 失败信息带固定分类：`凭据失效` / `限流` / `挑战未过` / `页面结构变化` /
 `网络不可达` / `解析失败` / `数据库错误` / `内部错误`。这样能一眼看出是
 「该重新登录了」还是「对面改版了」。
+
+<details>
+<summary><b>更新插件之后要不要重新绑定</b></summary>
+
+不用。绑定和做题记录存在 AstrBot 的 `data/plugin_data/astrbot_plugin_xcpc/xcpc.db`
+里，这个目录不在插件目录下 —— AstrBot 更新插件时是先把整个插件目录删掉再放新版本
+进去的，数据放在插件目录里会被一起删掉（v0.5.3 及以前就是这样，所以那会儿每次
+更新都要重新绑一遍）。
+
+从旧版本升上来的第一次，插件启动后会自动把插件目录里的 `data/` 搬到新位置，
+只搬一次，不会覆盖新位置已有的库。
+
+如果你想自己指定位置（比如放到另一块盘），把配置里的 `data_root` 填成绝对路径
+就行，那个优先级最高。
+</details>
+
 
 出错时它会明确报错并记日志，不会给你一个悄悄降级的结果。
 

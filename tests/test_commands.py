@@ -510,6 +510,143 @@ def test_no_crash():
     asyncio.run(main_())
 
 
+def test_data_root():
+    """数据不能在插件目录里 —— AstrBot 更新插件是先把整个插件目录删掉的。
+
+    用户报的："每次更新都要重新绑定这好麻烦啊"。根因就在这里。
+    """
+    print("\n[6] 数据放哪儿 —— 不能在插件目录里")
+
+    async def main_():
+        import importlib
+        install_stub()
+        import main as plugin_main
+        from astrbot.api.star import Context
+
+        # --- 插件名要跟 metadata.yaml 一致，AstrBot 靠它分数据目录 ---
+        meta = os.path.join(PLUGIN, "metadata.yaml")
+        meta_name = ""
+        if os.path.isfile(meta):
+            for line in io.open(meta, encoding="utf-8"):
+                if line.startswith("name:"):
+                    # 行尾可能带注释，去掉它再比
+                    meta_name = line.split(":", 1)[1].split("#")[0].strip()
+                    break
+        check("PLUGIN_NAME 和 metadata.yaml 的 name 一致",
+              meta_name == plugin_main.PLUGIN_NAME,
+              "metadata=%r 代码=%r" % (meta_name, plugin_main.PLUGIN_NAME))
+
+        # --- 1. 有 StarTools 就用它给的位置（更新插件动不到那儿） ---
+        star = sys.modules["astrbot.api.star"]
+        fake_base = tempfile.mkdtemp(prefix="xcpc_pdata_")
+
+        class _FakeStarTools:
+            @classmethod
+            def get_data_dir(cls, plugin_name=None):
+                return os.path.join(fake_base, plugin_name or "?")
+
+        star.StarTools = _FakeStarTools
+        importlib.reload(plugin_main)
+        p1 = plugin_main.XcpcPlugin(Context(), {"daily_push": False})
+        want = os.path.join(fake_base, plugin_main.PLUGIN_NAME)
+        check("有 StarTools 时数据放 data/plugin_data/<插件名>",
+              p1._data_root() == want, p1._data_root())
+        check("默认位置**不是**插件目录里的 data/",
+              os.path.abspath(p1._data_root())
+              != os.path.abspath(p1._bundled_data_root()), p1._data_root())
+
+        # --- 2. StarTools 拿不到时退回 astrbot_path 里的那个函数 ---
+        star.__dict__.pop("StarTools", None)
+        alt_base = tempfile.mkdtemp(prefix="xcpc_pdata2_")
+        pathmod = types.ModuleType("astrbot.core.utils.astrbot_path")
+        pathmod.get_astrbot_plugin_data_path = lambda: alt_base
+        core = types.ModuleType("astrbot.core")
+        utils = types.ModuleType("astrbot.core.utils")
+        core.utils = utils
+        utils.astrbot_path = pathmod
+        sys.modules.update({"astrbot.core": core, "astrbot.core.utils": utils,
+                            "astrbot.core.utils.astrbot_path": pathmod})
+        importlib.reload(plugin_main)
+        p2 = plugin_main.XcpcPlugin(Context(), {"daily_push": False})
+        check("没有 StarTools 时退回 get_astrbot_plugin_data_path()",
+              p2._data_root()
+              == os.path.join(alt_base, plugin_main.PLUGIN_NAME), p2._data_root())
+
+        # --- 3. 两个都拿不到（脱离 AstrBot 手工跑）才回插件目录 ---
+        sys.modules.pop("astrbot.core.utils.astrbot_path", None)
+        importlib.reload(plugin_main)
+        p3 = plugin_main.XcpcPlugin(Context(), {"daily_push": False})
+        check("脱离 AstrBot 时退回插件目录（自测用）",
+              p3._data_root() == p3._bundled_data_root(), p3._data_root())
+
+        # --- 4. 显式配的 data_root 永远最大 ---
+        mine = tempfile.mkdtemp(prefix="xcpc_mine_")
+        p4 = plugin_main.XcpcPlugin(Context(), {"data_root": mine})
+        check("配置里写了 data_root 就用它",
+              p4._data_root() == os.path.abspath(mine), p4._data_root())
+
+        # --- 5. 老数据搬家：只搬一次，永不覆盖 ---
+        adopt = plugin_main._adopt_bundled_data
+
+        def make(p, db=True, extra=()):
+            os.makedirs(p, exist_ok=True)
+            if db:
+                with io.open(os.path.join(p, "xcpc.db"), "wb") as f:
+                    f.write(b"OLD-DB")
+            for name in extra:
+                with io.open(os.path.join(p, name), "wb") as f:
+                    f.write(b"x")
+            return p
+
+        old = make(os.path.join(tempfile.mkdtemp(prefix="xcpc_old_"), "data"))
+        new = os.path.join(tempfile.mkdtemp(prefix="xcpc_new_"), "plugin_data")
+        r = adopt(old, new)
+        check("老数据搬过来了", r == (old, ""), repr(r))
+        check("新位置拿到库", os.path.isfile(os.path.join(new, "xcpc.db")),
+              repr(os.listdir(new) if os.path.isdir(new) else None))
+        check("老位置清掉了", not os.path.exists(old))
+
+        # 新位置已经有库 → 什么都不做，绝不覆盖
+        old2 = make(os.path.join(tempfile.mkdtemp(prefix="xcpc_old2_"), "data"))
+        new2 = os.path.join(tempfile.mkdtemp(prefix="xcpc_new2_"), "plugin_data")
+        make(new2)
+        r2 = adopt(old2, new2)
+        check("新位置已有库时不动手", r2 == ("", ""), repr(r2))
+        check("新位置的库没被覆盖",
+              io.open(os.path.join(new2, "xcpc.db"), "rb").read() == b"OLD-DB")
+
+        # 老位置没有库（历史遗留空目录）→ 不搬
+        old3 = os.path.join(tempfile.mkdtemp(prefix="xcpc_old3_"), "data")
+        os.makedirs(old3, exist_ok=True)
+        r3 = adopt(old3, os.path.join(tempfile.mkdtemp(prefix="xcpc_new3_"), "p"))
+        check("老位置没库时不搬（不留垃圾）", r3 == ("", ""), repr(r3))
+
+        # 目标目录已经存在（可能只有 logs/）→ 合并进去，不删已有的东西
+        old4 = make(os.path.join(tempfile.mkdtemp(prefix="xcpc_old4_"), "data"),
+                    extra=("keep.txt",))
+        new4 = os.path.join(tempfile.mkdtemp(prefix="xcpc_new4_"), "plugin_data")
+        os.makedirs(os.path.join(new4, "logs"), exist_ok=True)
+        with io.open(os.path.join(new4, "keep.txt"), "wb") as f:
+            f.write(b"NEWER")
+        r4 = adopt(old4, new4)
+        check("目标目录已存在时合并不报错", r4 == (old4, ""), repr(r4))
+        check("合并时没覆盖已有的同名文件",
+              io.open(os.path.join(new4, "keep.txt"), "rb").read() == b"NEWER")
+        check("合并时把库带过来了",
+              os.path.isfile(os.path.join(new4, "xcpc.db")))
+        check("合并时保留了目标里原有的子目录",
+              os.path.isdir(os.path.join(new4, "logs")))
+
+        # 同一路径 → 什么都不做（配置把 data_root 指到插件目录时）
+        same = os.path.join(tempfile.mkdtemp(prefix="xcpc_same_"), "data")
+        make(same)
+        check("新旧路径相同时不动手", adopt(same, same) == ("", ""))
+        check("新旧路径相同时库还在",
+              os.path.isfile(os.path.join(same, "xcpc.db")))
+
+    asyncio.run(main_())
+
+
 def test_config_is_read():
     """每个配置项都必须真的被读到。
 
@@ -566,6 +703,7 @@ def main() -> int:
     test_commands()
     test_no_user_id()
     test_no_crash()
+    test_data_root()
     test_config_is_read()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))

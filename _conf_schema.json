@@ -3,7 +3,7 @@
     "description": "数据目录（数据库与日志放这）",
     "type": "string",
     "default": "",
-    "hint": "留空 = 用插件自己的 data 目录。填绝对路径可以放到别处。目录里的 xcpc.db 存做题记录，logs/ 存日志。**每个 QQ 号的数据在这个库里按用户隔离。**"
+    "hint": "留空 = 用 AstrBot 的 data/plugin_data/astrbot_plugin_xcpc/。**别填成插件目录里的 data/** —— 更新插件时 AstrBot 会先把整个插件目录删掉，放那儿的库会跟着没，结果就是每次更新都要重新绑定。目录里的 xcpc.db 存绑定和做题记录，logs/ 存日志。**每个 QQ 号的数据在这个库里按用户隔离。**"
   },
   "llm_provider_id": {
     "description": "用哪个模型生成方案",

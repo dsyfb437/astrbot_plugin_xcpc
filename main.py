@@ -46,6 +46,7 @@ import asyncio
 import glob
 import os
 import re
+import shutil
 import time
 import traceback
 from datetime import timedelta
@@ -53,6 +54,43 @@ from datetime import timedelta
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
+
+# 插件名。要跟 metadata.yaml 的 name 一致 —— AstrBot 用它在
+# data/plugin_data/<name>/ 下面给插件分一块自己的数据目录。
+PLUGIN_NAME = "astrbot_plugin_xcpc"
+
+
+def _adopt_bundled_data(old: str, new: str) -> tuple[str, str]:
+    """把老位置（插件目录里）的数据搬到新位置。只搬一次，**永不覆盖**。
+
+    返回 ``(老目录, 原因)``：
+
+      * ``("", "")`` —— 没什么可搬的（老位置没有库，或者新位置已经有库了）
+      * ``(old, "")`` —— 搬好了
+      * ``(old, "为什么")`` —— 没搬动，得让用户知道数据还在老地方
+    """
+    if not old or not new or os.path.abspath(old) == os.path.abspath(new):
+        return "", ""
+    old_db = os.path.join(old, "xcpc.db")
+    if not os.path.isfile(old_db):
+        return "", ""                    # 老位置没东西，或早就搬过了
+    if os.path.isfile(os.path.join(new, "xcpc.db")):
+        return "", ""                    # 新位置已经有库了 —— 绝不覆盖
+    try:
+        os.makedirs(os.path.dirname(new) or ".", exist_ok=True)
+        if os.path.isdir(new):
+            # 目标目录已经在了（可能只有个空 logs/），逐个搬，不删已有的
+            for name in os.listdir(old):
+                src = os.path.join(old, name)
+                dst = os.path.join(new, name)
+                if not os.path.exists(dst):
+                    shutil.move(src, dst)
+            shutil.rmtree(old, ignore_errors=True)
+        else:
+            shutil.move(old, new)
+    except OSError as exc:
+        return old, str(exc)
+    return old, ""
 
 # 新的 core 包（存储 / 日志 / 平台适配）。
 #
@@ -382,21 +420,61 @@ class XcpcPlugin(Star):
     # ======================================================================
     # 存储与日志
     # ======================================================================
-    def _data_root(self) -> str:
-        """数据根目录。
+    def _bundled_data_root(self) -> str:
+        """插件目录里的 ``data/`` —— v0.5.4 之前的默认位置。
 
-        优先用配置里的 data_root；没配就用插件自己的 data 目录
-        （AstrBot 里插件目录可写，而且跟着插件走，卸载时一起清掉）。
+        新装的人不会再写到这儿，留着只是为了**把老数据搬出来**。
+        """
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
+    def _durable_data_root(self) -> str:
+        """AstrBot 给插件的数据目录：``data/plugin_data/astrbot_plugin_xcpc/``。
+
+        **数据不能放插件目录里。** AstrBot 更新插件是"先把整个插件目录删掉，
+        再放新版本进去"：
+
+          * ``astrbot/core/star/updater.py`` 的 ``update()`` —— 先
+            ``remove_dir(plugin_path)``，然后才 move / 解压；
+          * ``astrbot/cli/utils/plugin.py`` 的 ``download_repository()`` ——
+            ``if target_path.exists(): shutil.rmtree(target_path)``。
+
+        放在插件目录里的 ``xcpc.db`` 会被一起删掉，用户看到的就是
+        **每更新一次就要重新绑定一遍，做题历史也没了**。
+        ``data/plugin_data/`` 不在插件目录下，更新动不到它。
+
+        拿不到 AstrBot 的路径工具时（自测、脱离 AstrBot 手工跑）返回空串，
+        由调用方退回插件目录。
+        """
+        try:
+            from astrbot.api.star import StarTools
+            return str(StarTools.get_data_dir(PLUGIN_NAME))
+        except Exception:                                   # noqa: BLE001
+            pass
+        try:
+            from astrbot.core.utils.astrbot_path import (
+                get_astrbot_plugin_data_path,
+            )
+            return os.path.join(get_astrbot_plugin_data_path(), PLUGIN_NAME)
+        except Exception:                                   # noqa: BLE001
+            return ""
+
+    def _data_root(self) -> str:
+        """数据根目录（只算路径，不碰磁盘）。
+
+        优先用配置里的 data_root；没配就用 AstrBot 的 plugin_data 目录。
         """
         root = str(self.config.get("data_root") or "").strip()
         if root:
             return os.path.abspath(os.path.expanduser(root))
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        return self._durable_data_root() or self._bundled_data_root()
 
     async def _setup_storage(self) -> None:
         """打开日志与数据库。**失败不抛异常** —— 插件仍要能加载，
         只是把失败原因记下来，等用户用到相关命令时如实告诉他。"""
         root = self._data_root()
+        # moved: "" = 不用搬；否则是老数据所在的目录
+        # why:  "" = 搬好了；否则是搬不动的原因
+        moved, why = _adopt_bundled_data(self._bundled_data_root(), root)
         self.log = logm.Recorder(
             os.path.join(root, "logs", "xcpc.log"),
             level=str(self.config.get("log_level") or "info"),
@@ -405,6 +483,15 @@ class XcpcPlugin(Star):
         if not ok:
             logger.warning("[xcpc] 日志打不开：%s", detail)
         self.log.event("boot", detail="插件加载", data_root=root)
+        if moved and not why:
+            logger.info("[xcpc] 老数据已从 %s 搬到 %s", moved, root)
+            self.log.event("storage.moved", detail="老数据搬到 %s" % root,
+                           old=moved)
+        elif moved:
+            logger.warning("[xcpc] 数据还在插件目录里（%s），没能搬出来：%s",
+                           moved, why)
+            self.log.event("storage.moved", ok=False,
+                           error_kind="文件系统错误", old=moved, detail=why)
 
         self.db = dbm.Database(os.path.join(root, "xcpc.db"))
         ok, detail = await self.db.open()
@@ -1951,6 +2038,7 @@ class XcpcPlugin(Star):
                 store=self.store, db=self.db, recorder=self.log,
                 context=self.context,
                 config=self.config,
+                data_root=self._data_root(),
                 umo=event.unified_msg_origin,
                 user_id=uid)
         except Exception as exc:                       # noqa: BLE001

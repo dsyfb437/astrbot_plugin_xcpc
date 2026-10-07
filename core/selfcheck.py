@@ -131,7 +131,7 @@ def check_writable_dir(path: str, name: str, report: Report,
 
 async def run(*, store=None, db=None, recorder=None, context=None,
               config=None, umo: str = "", user_id: str = "",
-              routes_probe=None, syncer=None) -> Report:
+              routes_probe=None, syncer=None, data_root: str = "") -> Report:
     """跑一轮自检。
 
     参数都可有可无 —— 缺哪个就把那项标成"没传进来"，
@@ -141,12 +141,14 @@ async def run(*, store=None, db=None, recorder=None, context=None,
     r = Report()
 
     # ---- 1. 数据目录 --------------------------------------------------
-    data_root = str(config.get("data_root") or "").strip()
-    if data_root:
-        check_writable_dir(os.path.abspath(os.path.expanduser(data_root)),
+    # data_root 由调用方算好传进来（它知道 AstrBot 的数据目录在哪）。
+    # 没传就退回配置 / 插件自带目录 —— 自检是最后一道诊断，不能因为
+    # 少一个参数就整段不跑。
+    resolved = str(data_root or config.get("data_root") or "").strip()
+    if resolved:
+        check_writable_dir(os.path.abspath(os.path.expanduser(resolved)),
                            "数据目录可写", r)
     else:
-        # 没配就是用插件自带目录，那里应该永远可写
         here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         check_writable_dir(os.path.join(here, "data"), "数据目录可写（默认位置）", r)
 
