@@ -34,6 +34,7 @@ import io
 import json as jsonlib
 import os
 import re
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -60,6 +61,14 @@ DEFAULT_HEADERS = {
 _C3VK_RE = re.compile(r"C3VK=([0-9a-fA-F]{4,64})")
 # Cloudflare 的挑战页特征
 _CF_RE = re.compile(r"(?i)Just a moment|cf-challenge|__cf_chl|cf_chl_opt")
+
+# 重试之间等多久（秒）。第 1 次失败等 1 秒，第 2 次失败等 3 秒。
+# 指数退避没意义 —— 这里等的是"对面这一下抖完了没"，不是等限流窗口。
+_RETRY_BACKOFF = (1.0, 3.0)
+# 会被当成"再试一次就好"的异常。`socket.timeout` 在 3.10+ 就是
+# `TimeoutError`，写两个是为了在老解释器上也不会漏。
+_TRANSIENT_EXC = (urllib.error.URLError, TimeoutError, socket.timeout,
+                  ConnectionError)
 
 
 @dataclass
@@ -133,6 +142,16 @@ class HttpClient:
     # 自带的默认 `ProxyHandler` 照旧读 `http_proxy` / `https_proxy` 环境变量。
     # 这是故意的 —— 加这个功能不该悄悄改掉别人机器上已有的行为。
     proxy: str = ""
+    # 瞬时故障重试次数。**HTTP 4xx/5xx 不算瞬时故障，永远不重试** —— 那是
+    # 站点给的明确答复，重试只会更慢更惹人烦。只重试这三种：
+    # 读/连超时（`TimeoutError` / `socket.timeout`）、连接被拒/被重置
+    # （`ConnectionError`）、以及 urllib 包起来的 `URLError`。
+    #
+    # 为什么必须有：洛谷一次全量要拉 37 页、实测 72 秒，其中**任意一页**
+    # 卡一下（2026-10-08 02:09 就是在第 8 页读了 20.4 秒，刚好越过下面的
+    # `timeout=20`）就会让整次同步失败，前面 7 页 140 条全部白拉 ——
+    # `fetch_submissions` 失败时是整批丢弃的，没有"存一半"这回事。
+    retry_attempts: int = 3
 
     _hosts: dict[str, _Host] = field(default_factory=dict, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -291,27 +310,54 @@ class HttpClient:
             await self._throttle(host)
             req = self._build_request(cur_url, cur_method, body, headers or {})
             started = time.monotonic()
-            try:
-                status, raw, location = await asyncio.to_thread(self._do_request, req)
-            except urllib.error.URLError as exc:
+
+            # ---- 瞬时故障重试（理由见 `retry_attempts` 的注释）----------
+            exc_seen: BaseException | None = None
+            for attempt in range(1, max(1, self.retry_attempts) + 1):
+                try:
+                    status, raw, location = await asyncio.to_thread(
+                        self._do_request, req)
+                    exc_seen = None
+                    break
+                except _TRANSIENT_EXC as exc:
+                    exc_seen = exc
+                except Exception as exc:                  # noqa: BLE001
+                    exc_seen = exc
+                    break            # 不是"再试一下就好"的错，别浪费重试
+                if attempt < self.retry_attempts:
+                    wait = _RETRY_BACKOFF[min(attempt - 1,
+                                              len(_RETRY_BACKOFF) - 1)]
+                    if self.recorder:
+                        self.recorder.event(
+                            "http.retry", url=cur_url, platform=self.platform,
+                            detail="第 %d 次失败（%s），%.1f 秒后重试"
+                                   % (attempt, type(exc_seen).__name__, wait))
+                    await asyncio.sleep(wait)
+
+            if exc_seen is not None:
                 elapsed = int((time.monotonic() - started) * 1000)
-                kind = "网络不可达"
+                # **超时 / 连不上都是"网络不可达"，不是"内部错误"。**
+                # 原来它们落进兜底分支报 `内部错误`，把排查方向带偏过一整轮
+                # （用户看到的失败类型是"内部错误"，完全指不到网络）。
+                kind = ("网络不可达" if isinstance(exc_seen, _TRANSIENT_EXC)
+                        else "内部错误")
+                cause = getattr(exc_seen, "reason", exc_seen)
+                note = str(cause)[:120]
                 self._count_error(kind)
                 if self.recorder:
                     self.recorder.http(cur_method, cur_url, duration_ms=elapsed,
                                        platform=self.platform, error_kind=kind,
-                                       note=str(getattr(exc, "reason", exc))[:120],
-                                       level="info")
-                raise HttpError("连不上 %s：%s" % (host, getattr(exc, "reason", exc)),
-                                kind) from exc
-            except Exception as exc:                      # noqa: BLE001
-                elapsed = int((time.monotonic() - started) * 1000)
-                self._count_error("内部错误")
-                if self.recorder:
-                    self.recorder.http(cur_method, cur_url, duration_ms=elapsed,
-                                       platform=self.platform, error_kind="内部错误",
-                                       note=type(exc).__name__, level="info")
-                raise HttpError("请求异常：%s" % exc, "内部错误") from exc
+                                       note=note, level="info")
+                if isinstance(cause, (TimeoutError, socket.timeout)):
+                    raise HttpError(
+                        "%s 在 %g 秒内没把响应读完（试了 %d 次）。这是对面"
+                        "偶发的慢，不是配置问题，重跑一次通常就好。"
+                        % (host, self.timeout, self.retry_attempts),
+                        kind) from exc_seen
+                if kind == "网络不可达":
+                    raise HttpError("连不上 %s：%s" % (host, note),
+                                    kind) from exc_seen
+                raise HttpError("请求异常：%s" % exc_seen, kind) from exc_seen
 
             elapsed = int((time.monotonic() - started) * 1000)
             text_head = raw[:2000].decode("utf-8", errors="replace")

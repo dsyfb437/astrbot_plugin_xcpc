@@ -301,6 +301,10 @@ class Luogu:
 
         out: list[Submission] = []
         truncated = False
+        # 游标 = 见过的最新一条的时间。**每一行都要更新，不能只更新入队的那
+        # 些** —— 增量同步时进来的行全被 `since_epoch` 挡掉，如果只在入队时
+        # 更新，游标就会退化成 0，下一次又变成全量 37 页（实测 72 秒）。
+        newest = 0
 
         for page in range(1, self._MAX_PAGES + 1):
             resp = await client.get(
@@ -335,6 +339,7 @@ class Luogu:
                 if not pid:
                     continue
                 epoch = int(r.get("submitTime") or 0)
+                newest = max(newest, epoch)
                 if since_epoch and epoch and epoch <= since_epoch:
                     # 从新到旧排的，碰到旧于游标的就可以收工了
                     reached_old = True
@@ -366,7 +371,11 @@ class Luogu:
         else:
             truncated = True                # for 跑完没 break = 撞到页数上限
 
-        return Fetched(items=out, ok=True, truncated=truncated)
+        # `max(newest, since_epoch)` 而不是光 `newest`：这一页可能整页都比
+        # 游标旧（账号最近没交题），那时 `newest < since_epoch`，直接拿
+        # `newest` 当游标会让游标**倒退**，下次白拉一遍。
+        return Fetched(items=out, ok=True, cursor=max(newest, since_epoch or 0),
+                       truncated=truncated)
 
     async def fetch_contests(self, uid: str, client=None) -> Fetched:
         return Fetched(ok=False, error_kind="页面结构变化",

@@ -595,6 +595,108 @@ def test_proxy() -> None:
                 os.environ[k] = v
 
 
+def test_retry() -> None:
+    """瞬时故障要重试，而且超时要归类成**网络不可达**。
+
+    背景（2026-10-08）：用户在群里同步洛谷，报的是
+        `洛谷 ✗ [内部错误] HttpError: 请求异常：The read operation timed out`
+    —— 明明是对面第 8 页读了 20.4 秒、刚好越过 `timeout=20`，
+    却因为落进兜底分支被报成"内部错误"，排查方向直接跑到代码上去了。
+    同时它**一次都不重试**，前面 7 页 140 条全白拉。
+    """
+    print("\n[10] 重试与超时分类")
+    base = "https://example.invalid"
+    real_backoff = httpm._RETRY_BACKOFF
+    httpm._RETRY_BACKOFF = (0.0, 0.0)          # 测试里别真睡 4 秒
+    try:
+        check("退避表是固定值", real_backoff == (1.0, 3.0), repr(real_backoff))
+
+        # ---- 一直读超时：试满 3 次，报"网络不可达" ----
+        c = httpm.HttpClient(platform="x", min_interval=0.0, retry_attempts=3)
+        seen: list[str] = []
+
+        def always_timeout(req):
+            seen.append(req.full_url)
+            raise TimeoutError("The read operation timed out")
+
+        c._do_request = always_timeout        # type: ignore[assignment]
+        try:
+            asyncio.run(c.get(base + "/slow"))
+            check("读超时会抛 HttpError", False, "居然成功了")
+        except httpm.HttpError as exc:
+            check("读超时归类成『网络不可达』（不是『内部错误』）",
+                  exc.kind == "网络不可达", "实际 %r" % exc.kind)
+            check("试满 retry_attempts 次", len(seen) == 3, "实际 %d" % len(seen))
+            check("文案说清是超时、且不是配置问题",
+                  "秒内没把响应读完" in str(exc), str(exc)[:70])
+
+        # ---- 抖两下之后成功：这就是加重试的意义 ----
+        c2 = httpm.HttpClient(platform="x", min_interval=0.0, retry_attempts=3)
+        tries: list[int] = []
+
+        def flaky(req):
+            tries.append(1)
+            if len(tries) < 3:
+                raise TimeoutError("The read operation timed out")
+            return 200, b'{"ok": true}', ""
+
+        c2._do_request = flaky                 # type: ignore[assignment]
+        r = asyncio.run(c2.get(base + "/flaky"))
+        check("抖两下之后能成功", r.status == 200 and r.json()["ok"] is True)
+        check("一共试了 3 次", len(tries) == 3, "实际 %d" % len(tries))
+
+        # ---- retry_attempts=1：一次都不重试 ----
+        c3 = httpm.HttpClient(platform="x", min_interval=0.0, retry_attempts=1)
+        once: list[int] = []
+
+        def reset(req):
+            once.append(1)
+            raise ConnectionResetError("connection reset by peer")
+
+        c3._do_request = reset                 # type: ignore[assignment]
+        try:
+            asyncio.run(c3.get(base + "/reset"))
+            check("连接被重置会抛 HttpError", False, "居然成功了")
+        except httpm.HttpError as exc:
+            check("retry_attempts=1 时只发一次", len(once) == 1,
+                  "实际 %d" % len(once))
+            check("连接被重置也归『网络不可达』",
+                  exc.kind == "网络不可达", exc.kind)
+
+        # ---- HTTP 404 是明确答复：一次都不重试，也不抛异常 ----
+        c4 = httpm.HttpClient(platform="x", min_interval=0.0, retry_attempts=3)
+        hits: list[int] = []
+
+        def not_found(req):
+            hits.append(1)
+            return 404, b"nope", ""
+
+        c4._do_request = not_found             # type: ignore[assignment]
+        r4 = asyncio.run(c4.get(base + "/missing"))
+        check("404 正常返回、不重试",
+              r4.status == 404 and len(hits) == 1, "请求 %d 次" % len(hits))
+
+        # ---- 非瞬时异常也不重试（别把 bug 当成网络抖动）----
+        c5 = httpm.HttpClient(platform="x", min_interval=0.0, retry_attempts=3)
+        bugs: list[int] = []
+
+        def boom(req):
+            bugs.append(1)
+            raise ValueError("解析器写错了")
+
+        c5._do_request = boom                  # type: ignore[assignment]
+        try:
+            asyncio.run(c5.get(base + "/bug"))
+            check("非瞬时异常会抛 HttpError", False, "居然成功了")
+        except httpm.HttpError as exc:
+            check("非瞬时异常只发一次（不浪费重试）", len(bugs) == 1,
+                  "实际 %d" % len(bugs))
+            check("非瞬时异常仍是『内部错误』",
+                  exc.kind == "内部错误", exc.kind)
+    finally:
+        httpm._RETRY_BACKOFF = real_backoff
+
+
 def main() -> int:
     print("=" * 62)
     print("core/http.py + platforms/ 离线自测（不碰外网）")
@@ -612,6 +714,7 @@ def main() -> int:
     test_rate_limit()
     test_ua()
     test_proxy()
+    test_retry()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

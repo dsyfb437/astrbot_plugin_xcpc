@@ -139,7 +139,11 @@ class Qoj:
             # 登录了但一行都解析不出来 → 多半是改版了，**不能当成"零提交"**
             return Fetched(ok=False, error_kind="页面结构变化",
                            detail="登录成功但提交页解析不出任何行（QOJ 可能改版）")
-        return Fetched(items=rows, ok=True)
+        # QOJ 的提交页不分页，一次就给最近的一批。游标取见过的最新时间，
+        # 这样下次同步能把"比它旧的"直接跳过（和 CF / AtCoder / 洛谷一致）。
+        newest = max((s.epoch or 0 for s in rows), default=0)
+        return Fetched(items=rows, ok=True,
+                       cursor=max(newest, since_epoch or 0))
 
     @staticmethod
     def _parse_submission_rows(html: str) -> list[Submission]:

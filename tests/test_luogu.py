@@ -377,6 +377,29 @@ def test_fetch_submissions():
               got.ok and got.items[0].verdict == "12",
               repr(got.items[0].verdict) if got.ok else "")
 
+        # --- 6.1b ★ 游标：洛谷**从来不设 cursor**，于是 `save_sync_ok`
+        # 存下的 `last_epoch` 永远是 None，每次同步都全量拉 37 页 / 72 秒。
+        # 拉得越久越容易撞上某一页超时（2026-10-08 02:09 第 8 页 20.4 秒）。
+        check("★ 返回 cursor（= 见过的最新时间）",
+              got.ok and got.cursor == 1788592435,
+              repr(got.cursor) if got.ok else "")
+        c6 = FakeClient({"/record/list": Resp(
+            200, records_html([row(9, "P1001", 700)], count=1))})
+        c6.set_cookies(CK)
+        got6 = await lg.fetch_submissions("1823658", 1788592435, c6)
+        check("全都是旧记录时不入队", got6.ok and got6.items == [],
+              repr(len(got6.items)) if got6.ok else "")
+        check("★ 游标不倒退（还是 1788592435）",
+              got6.ok and got6.cursor == 1788592435, repr(got6.cursor))
+        c7 = FakeClient({"/record/list": Resp(200, records_html(
+            [row(10, "P1002", 1788599999), row(11, "P1003", 700)], count=2))})
+        c7.set_cookies(CK)
+        got7 = await lg.fetch_submissions("1823658", 1788592435, c7)
+        check("增量只收新的那一条", got7.ok and len(got7.items) == 1,
+              repr(len(got7.items)) if got7.ok else "")
+        check("游标前进到最新", got7.ok and got7.cursor == 1788599999,
+              repr(got7.cursor))
+
         # --- 6.2 那个根本不存在的方法
         check("★ 不再调用不存在的 self._extract_json",
               not hasattr(Luogu, "_extract_json"))
