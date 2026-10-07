@@ -644,6 +644,23 @@ def test_data_root():
         check("新旧路径相同时库还在",
               os.path.isfile(os.path.join(same, "xcpc.db")))
 
+        # --- 6. 脱离 AstrBot 时**不许搬家** ---
+        # 否则跑一次测试就把开发机上真实的 <插件目录>/data 搬进临时目录了。
+        # p3 是上面第 3 种情形（两个路径 API 都拿不到）造的那个实例。
+        bundle = make(os.path.join(tempfile.mkdtemp(prefix="xcpc_bundle_"),
+                                   "data"))
+        p3._bundled_data_root = lambda: bundle
+        p3.config = {"data_root": tempfile.mkdtemp(prefix="xcpc_tmp_")}
+        await p3._setup_storage()
+        # 注意：诊断信息本身不能抛异常 —— 搬家成功时老目录整个被删了，
+        # 直接 os.listdir 会 FileNotFoundError，把"断言失败"变成"测试崩了"。
+        detail = (repr(os.listdir(bundle)) if os.path.isdir(bundle)
+                  else "老目录已经被搬走了")
+        check("脱离 AstrBot 时不搬家（不然测试会搬走开发机上的真数据）",
+              os.path.isfile(os.path.join(bundle, "xcpc.db")), detail)
+        if p3.db:
+            await p3.db.close()
+
     asyncio.run(main_())
 
 

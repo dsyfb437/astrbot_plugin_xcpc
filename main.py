@@ -474,7 +474,13 @@ class XcpcPlugin(Star):
         root = self._data_root()
         # moved: "" = 不用搬；否则是老数据所在的目录
         # why:  "" = 搬好了；否则是搬不动的原因
-        moved, why = _adopt_bundled_data(self._bundled_data_root(), root)
+        #
+        # 只有确实跑在 AstrBot 里（拿得到 plugin_data 路径）才搬。否则自测 /
+        # 脱离 AstrBot 手工跑时，会把开发机上真实的 <插件目录>/data 搬进
+        # 临时目录 —— 测一次搬一次，那是很坏的副作用。
+        moved, why = ("", "")
+        if self._durable_data_root():
+            moved, why = _adopt_bundled_data(self._bundled_data_root(), root)
         self.log = logm.Recorder(
             os.path.join(root, "logs", "xcpc.log"),
             level=str(self.config.get("log_level") or "info"),
