@@ -739,8 +739,19 @@ def test_either_of():
         check("qoj 挂的是 EitherOf", isinstance(auth, accm.EitherOf), repr(auth))
         check("两步验证仍然可达（EitherOf 必须透传 submit_2fa）",
               hasattr(auth, "submit_2fa"))
-        check("cookie 那条路认得 uoj_username",
-              getattr(auth.cookie_path, "uid_cookie", "") == "uoj_username")
+        # 用户看过真机：qoj.ac 上没有 uoj_username / uoj_remember_token
+        # （上游 UOJ 会发，qoj 没有），所以表单上不该有这两个填不满的框。
+        qoj_fields = set(_page_fields().get("qoj", ()))
+        check("QOJ 表单上不再摆 uoj_username / uoj_remember_token",
+              not (qoj_fields & {"uoj_username", "uoj_remember_token"}),
+              repr(sorted(qoj_fields)))
+        check("QOJ 表单上的 cookie 框就是 cookie_names 那几个",
+              set(getattr(auth.cookie_path, "cookie_names", ())) <= qoj_fields,
+              repr(sorted(qoj_fields)))
+        check("QOJ 的 uid 不在 cookie 里（靠表单上的用户名框）",
+              getattr(auth.cookie_path, "uid_cookie", "") == "")
+        check("QOJ 认不出 uid 时会失败，不假装成功",
+              getattr(auth.cookie_path, "needs_uid", False) is True)
 
         # 用户报过：QOJ 上没有 `__client_id`（那是洛谷的）。那时我们照洛谷抄，
         # 结果"登录成功"被判成失败。这两条是防它再抄回去。
@@ -761,21 +772,28 @@ def test_either_of():
             return True, "验证通过，拉到 2 条记录"
         auth.cookie_path.verifier = ok_verify
 
+        # 顺带塞一个 uoj_username 进去：表单上已经没有这个框了，
+        # 就算有谁手写请求塞进来，也不该变成 uid 的来源。
         r = await svc.start_login("qq1001", "qoj",
-                                  {"__Host-UOJSESSID": "sess", "uoj_username": "alice"})
+                                  {"__Host-UOJSESSID": "sess",
+                                   "username": "alice",
+                                   "uoj_username": "wrong-name"})
         check("填了 cookie 就走 cookie 那条路", r["state"] == "ok", r["message"])
-        check("QOJ 用户名落成 qoj_uid",
+        check("QOJ 用户名落成 qoj_uid（且不是那个已经删掉的框给的）",
               await store.get_handle("qq1001", "qoj") == "alice",
               await store.get_handle("qq1001", "qoj"))
         check("QOJ 凭据落库",
               (await store.get_credentials("qq1001", "qoj")).get("__Host-UOJSESSID")
               == "sess")
 
-        # 只抄了会话 cookie、名字框也空着 → 认不出用户 id，点名 uoj_username
+        # 只抄了会话 cookie、名字框也空着 → 认不出用户 id，要说清楚怎么办
         r15 = await svc.start_login("qq1501", "qoj", {"__Host-UOJSESSID": "sess"})
-        check("只填会话 cookie 时点名 uoj_username",
-              r15["state"] == "failed" and "uoj_username" in r15["message"],
+        check("只填会话 cookie 时说要填用户名",
+              r15["state"] == "failed" and "名字框" in r15["message"],
               r15["message"])
+        check("认不出 uid 时不允许成功（不然同步才报错，更晚更气人）",
+              r15["state"] != "ok" and
+              await store.get_handle("qq1501", "qoj") == "")
 
         # 只抄了会话 cookie，但名字框填了 → 也算认出来了（uid 兜底）
         r16 = await svc.start_login(

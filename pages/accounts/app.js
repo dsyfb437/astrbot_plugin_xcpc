@@ -196,22 +196,19 @@
       note: "两条路选一条。填用户名和密码登录（账号开了两步验证的话，"
           + "提交后会再要一次验证码）；**或者**走下面的 Cookie —— "
           + "先在自己的浏览器里登录 QOJ，从开发者工具的 Application → "
-          + "Cookies 里把下面几个的名字和值抄过来，这样密码一次都不用"
-          + "经过这台服务器。QOJ 没有第三方登录可跳，填 Cookie 就是"
-          + "那个\"不用输密码\"的办法。"
-          + "只有第一个是必须的，会话就靠它；后面两个登录时会一起下发，"
-          + "抄上更耐用，找不到就留空。"
-          + "上面那个用户名框填了的话，也能当作用户 ID。",
+          + "Cookies 里把 __Host-UOJSESSID 的值抄过来，"
+          + "这样密码一次都不用经过这台服务器。"
+          + "QOJ 没有第三方登录可跳，贴 Cookie 就是那个\"不用输密码\"的办法。"
+          + "用户名两种方式都要填 —— QOJ 的提交记录得按用户存。"
+          + "Cookie 那个框里整条粘进来也行，插件会自己挑出要的那段。",
       fields: [
-        { k: "username", label: "用户名", ph: "", type: "text" },
-        { k: "password", label: "密码", ph: "", type: "password" },
+        { k: "username", label: "用户名（两种方式都要填）",
+          ph: "你的 QOJ 用户名", type: "text" },
+        { k: "password", label: "密码（只有上面那条路要用）", ph: "",
+          type: "password" },
         { k: "__Host-UOJSESSID",
-          label: "Cookie：__Host-UOJSESSID（必填，会话就靠它）",
-          ph: "一长串随机字符", type: "textarea", wide: true },
-        { k: "uoj_username", label: "Cookie：uoj_username（你的用户名）",
-          ph: "就是你的 QOJ 用户名", type: "text" },
-        { k: "uoj_remember_token", label: "Cookie：uoj_remember_token",
-          ph: "60 个字符，让插件在会话过期后自己恢复登录", type: "text" }
+          label: "Cookie：__Host-UOJSESSID（走 Cookie 那条路才填）",
+          ph: "一长串随机字符，登录后才有", type: "textarea", wide: true }
       ]
     },
     {

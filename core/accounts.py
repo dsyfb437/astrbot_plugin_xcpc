@@ -371,7 +371,8 @@ class ManualCookie:
     required: tuple = ()      # 必填的 cookie 名
     optional: tuple = ()      # 选填的，填了就带上
     verifier: Any = None      # async (cookies, client) -> (ok, message)
-    uid_cookie: str = ""      # 用户 id 在哪个 cookie 里（空 = 这个平台不需要）
+    uid_cookie: str = ""      # 用户 id 在哪个 cookie 里（空 = 不在 cookie 里）
+    needs_uid: bool = False   # 认不出用户 id 就别装作成功（提交记录按用户查）
 
     @property
     def cookie_names(self) -> tuple:
@@ -435,11 +436,13 @@ class ManualCookie:
                 return session
             session.message = msg or "验证通过"
 
-        if self.uid_cookie and not uid:
+        if self.needs_uid and not uid:
             session.state = S_FAILED
-            session.message = ("没填 `%s`，也没在上面那个名字框里填名字，"
-                               "认不出你是谁 —— 这个平台的提交记录得按用户查。"
-                               % self.uid_cookie)
+            where = ("没填 `%s`，也没在上面那个名字框里填名字"
+                     % self.uid_cookie) if self.uid_cookie else \
+                    "没在上面那个名字框里填名字"
+            session.message = ("%s，认不出你是谁 —— "
+                               "这个平台的提交记录得按用户查。" % where)
             return session
 
         session.cookies = cookies
@@ -729,24 +732,28 @@ def default_authenticators() -> dict:
         "atcoder": HandleOnly(platform="atcoder", fetcher=atc_fetch),
         "qoj": EitherOf(
             primary=QojLogin(),
-            # 真正必须的只有会话 cookie（`QOJ_SESSION_COOKIES`，qoj.ac 上
-            # 实发名是 `__Host-UOJSESSID`）。
+            # 表单上只有会话 cookie 一个 cookie 框。qoj.ac 实发的会话 cookie
+            # 是 `__Host-UOJSESSID`（见 `QOJ_SESSION_COOKIES`）。
             #
-            # `uoj_username` / `uoj_remember_token` 是 UOJ 在登录时一起下发的
-            # 两个 10 年期的 cookie（`web/app/models/Auth.php` 的
-            # `Auth::login()` 里 `Cookie::safeSet('uoj_username', …)`；
-            # 登录控制器调的就是默认 `$remember = true`）。前者是 qoj_uid
-            # 的来源，后者能让服务端在会话过期后自己恢复登录态 ——
-            # 都填上更耐用，所以列为选填而不是必填。
+            # 上游 UOJ 的 `Auth::login()` 里还会 `Cookie::safeSet('uoj_username'…)`
+            # / `safeSet('uoj_remember_token'…)` 各下发一个 10 年期的 cookie
+            # （`web/app/models/Auth.php`，登录控制器调的是默认 `$remember = true`），
+            # **但真机上没见过**，所以不在表单上摆两个填不满的框。
+            # 它们只值"会话过期后服务端能自己恢复登录态"这一点好处，
+            # 少抄了也不影响 —— `Auth::initMyUser()` 先看的就是
+            # `$_SESSION['username']`，也就是会话 cookie 里那个。
+            #
+            # uid 不在 cookie 里（`uid_cookie=""`），由表单上的用户名框给。
+            # QOJ 的提交记录得存个用户名，认不出来就别假装成功。
             cookie_path=ManualCookie(platform="qoj",
                                      required=("__Host-UOJSESSID",),
-                                     optional=("uoj_username", "uoj_remember_token"),
-                                     uid_cookie="uoj_username",
+                                     uid_cookie="", needs_uid=True,
                                      verifier=qoj_verify),
         ),
         # 洛谷的 _uid 既是 cookie 也是用户 id，一填两用；
         # C3VK 不列在这里 —— 那是 CDN 挑战 cookie，5 分钟过期，http.py 自己会解
         "luogu": ManualCookie(platform="luogu",
                               required=("__client_id", "_uid"),
-                              uid_cookie="_uid", verifier=luogu_verify),
+                              uid_cookie="_uid", needs_uid=True,
+                              verifier=luogu_verify),
     }

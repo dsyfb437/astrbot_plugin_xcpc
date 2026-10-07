@@ -125,12 +125,12 @@ Application → Cookies 里挨个抄过来就行，不用自己拼分号：
 
 | 平台 | 要填的 Cookie | 怎么登录 |
 | --- | --- | --- |
-| QOJ | `__Host-UOJSESSID`（必填）、`uoj_username`、`uoj_remember_token` | 也可以直接填用户名密码（开了两步验证会再要一次验证码）。两条路选一条，填了 Cookie 就走 Cookie |
-| 洛谷 | `__client_id`（必填）、`_uid` | 只能填 Cookie。`_uid` 就是你的用户 ID，在主页地址里，形如 `luogu.com.cn/user/123456` |
+| QOJ | `__Host-UOJSESSID` | 也可以直接填用户名密码（开了两步验证会再要一次验证码）。两条路选一条，填了 Cookie 就走 Cookie |
+| 洛谷 | `__client_id`、`_uid` | 只能填 Cookie。`_uid` 就是你的用户 ID，在主页地址里，形如 `luogu.com.cn/user/123456` |
 
-QOJ 只有第一个是必须的，会话就靠它；后两个是登录时一起下发的，
-抄上更耐用（`uoj_remember_token` 能让插件在会话过期后自己恢复登录态），
-找不到就留空 —— 留空时用户名会从页面上的用户名框取。
+QOJ 的 Cookie 就一个 —— 会话 cookie `__Host-UOJSESSID`（UOJ 上游叫
+`UOJSESSID`，qoj.ac 加了 `__Host-` 前缀，两个名字都认）。
+用户名那个框两种登录方式都要填，因为 QOJ 的提交记录得按用户存。
 
 洛谷的 `C3VK` 不用填 —— 那是 CDN 的挑战 cookie，五分钟就过期，
 插件自己会解出来，让用户填是白填。
