@@ -306,13 +306,20 @@ class ManualCookie:
     """手动导入 Cookie。
 
     **这不是降级路径，是设计内的路径。** 洛谷的自动登录还没打通，
+    QOJ 也没有 OAuth（登录页上就账号密码两个框，实测过），
     而用户在浏览器里登录后复制 Cookie 是完全可行的 ——
     同样能拿到完整数据，只是步骤多一点。
+
+    `uid_cookie` 是这个站点把**用户 id** 放在哪个 cookie 里（洛谷是 `_uid`）。
+    洛谷的提交记录得靠 `/record/list?user=<uid>` 才拉得到，认不出来的话
+    `users.luogu_uid` 就是空的，同步时会说"还没绑定 handle" ——
+    明明刚提示过"验证通过"。所以这里取不到就**直接失败**，不装作成功。
     """
 
     platform: str
     required: tuple = ()      # 至少要有的字段名（空 = 不检查）
     verifier: Any = None      # async (cookies, client) -> (ok, message)
+    uid_cookie: str = ""      # 用户 id 在哪个 cookie 里（空 = 这个平台不需要）
 
     async def start(self, svc, session: Session, fields: dict) -> Session:
         raw = str(fields.get("cookies") or fields.get("cookie") or "").strip()
@@ -324,10 +331,16 @@ class ManualCookie:
         missing = [k for k in self.required if k not in cookies]
         if missing:
             session.state = S_FAILED
-            session.message = ("缺关键字段：%s。"
+            session.message = ("缺关键字段：%s。解析出来的字段有 %s —— "
                                "确认复制的是**登录后**的完整 Cookie。"
-                               % "、".join(missing))
+                               % ("、".join(missing),
+                                  "、".join(sorted(cookies)) or "（一个都没有）"))
             return session
+
+        # 用户 id：表单里填了就用填的，没填就看 cookie 里带没带
+        uid = str(fields.get("handle") or fields.get("username") or "").strip()
+        if not uid and self.uid_cookie:
+            uid = str(cookies.get(self.uid_cookie) or "").strip()
 
         session.state = S_WORKING
         session.message = "正在验证…"
@@ -346,9 +359,53 @@ class ManualCookie:
                 return session
             session.message = msg or "验证通过"
 
+        if self.uid_cookie and not uid:
+            session.state = S_FAILED
+            session.message = ("Cookie 里没有 `%s`，认不出你的用户 ID。"
+                               "重新复制一次**登录后**的完整 Cookie，"
+                               "或者在上面的输入框里把 ID 直接填上。"
+                               % self.uid_cookie)
+            return session
+
         session.cookies = cookies
+        if uid:
+            session.ctx["handle"] = uid
+        # 把"识别到了哪些字段"说出来 —— 页面只回这一句话，
+        # 用户看不见解析结果的话，少贴一段就只能靠猜（值本身绝不回显）
+        session.message = "%s（解析到 %d 个字段：%s）" % (
+            session.message, len(cookies), "、".join(sorted(cookies)))
         session.state = S_OK
         return session
+
+
+@dataclass
+class EitherOf:
+    """同一平台有两条登录路：填了 Cookie 走 Cookie 导入，否则走主路径。
+
+    QOJ 就属于这种 —— 没有 OAuth 可跳（登录页只有账号密码两个框），
+    但你可以先在自己的浏览器里登录，把 Cookie 贴进来，
+    **密码一次都不用经过这台服务器**。
+
+    `submit_2fa` 之类只有主路径才有的方法用 `__getattr__` 透传，
+    否则 `AccountService.submit_2fa` 里的 `hasattr(auth, "submit_2fa")`
+    会变成假 —— 两步验证就静悄悄地没了。
+    """
+
+    primary: Any = None
+    cookie_path: Any = None
+
+    async def start(self, svc, session: Session, fields: dict) -> Session:
+        raw = str(fields.get("cookies") or fields.get("cookie") or "").strip()
+        if raw and self.cookie_path is not None:
+            return await self.cookie_path.start(svc, session, fields)
+        return await self.primary.start(svc, session, fields)
+
+    def __getattr__(self, name):
+        # 只在正常查找失败后才走到这里，所以主路径的方法（比如 submit_2fa）都能用
+        primary = self.__dict__.get("primary")
+        if primary is None:
+            raise AttributeError(name)
+        return getattr(primary, name)
 
 
 # ---------------------------------------------------------------------------
@@ -475,14 +532,18 @@ class AccountService:
         return s.public()
 
     async def logout(self, owner_id: str, platform: str) -> dict:
-        """解绑：删掉凭据**和**该平台的登录状态。
+        """解绑：删掉凭据**和** handle，也就是这个平台的全部登录状态。
 
         注意**只删凭据，不删做题数据** —— 解绑账号不该把历史记录也清掉。
+
+        handle 必须一起清：CF / AtCoder 根本没有凭据行，它们的"绑定"
+        就是那一列 handle，只删 credentials 等于什么都没做（界面还是"已绑定"）。
         """
         owner_id = str(owner_id or "").strip()
         if not owner_id:
             raise AccountError("user_id 不能为空", "内部错误")
         await self.store.clear_credentials(owner_id, platform)
+        await self.store.set_handle(owner_id, platform, "")
         if self.recorder:
             self.recorder.event("auth.logout", user_id=owner_id, platform=platform)
         return {"ok": True, "platform": platform, "status": "unbound"}
@@ -572,9 +633,30 @@ def default_authenticators() -> dict:
             return False, "这段 Cookie 用不了（服务端说未登录）"
         return False, "%s：%s" % (got.error_kind, got.detail)
 
+    async def qoj_verify(cookies, client):
+        """QOJ：直接拉一次提交列表。
+
+        用真接口验，不用小聪明 —— 它能过，`/xcpc 同步` 就能过。
+        """
+        Qoj = import_platform("qoj").Qoj
+        qj = Qoj()
+        got = await qj.fetch_submissions("", None, client)
+        if got.ok:
+            return True, "验证通过，拉到 %d 条记录" % len(got.items)
+        if got.error_kind == "凭据失效":
+            return False, "这段 Cookie 用不了（服务端说没登录）"
+        return False, "%s：%s" % (got.error_kind, got.detail)
+
     return {
         "codeforces": HandleOnly(platform="codeforces", fetcher=cf_fetch),
         "atcoder": HandleOnly(platform="atcoder", fetcher=atc_fetch),
-        "qoj": QojLogin(),
-        "luogu": ManualCookie(platform="luogu", required=(), verifier=luogu_verify),
+        "qoj": EitherOf(
+            primary=QojLogin(),
+            # QOJ 的用户名就藏在 uoj_username 这个 cookie 里；取不到就报错，
+            # 不能留一个空的 qoj_uid —— 那会让自动同步漏掉这个人
+            cookie_path=ManualCookie(platform="qoj", uid_cookie="uoj_username",
+                                     verifier=qoj_verify),
+        ),
+        "luogu": ManualCookie(platform="luogu", required=("__client_id",),
+                              uid_cookie="_uid", verifier=luogu_verify),
     }

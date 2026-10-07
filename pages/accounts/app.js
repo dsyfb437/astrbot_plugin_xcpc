@@ -193,21 +193,31 @@
     },
     {
       id: "qoj", name: "QOJ",
-      note: "需要登录。若账号开了两步验证，提交后会再要一次验证码。",
+      note: "两条路选一条：填用户名和密码登录（账号开了两步验证的话，"
+          + "提交后会再要一次验证码），**或者**只贴 Cookie —— "
+          + "先在自己的浏览器里登录 QOJ，从开发者工具里把 Cookie 复制过来。"
+          + "QOJ 没有第三方登录可跳，贴 Cookie 就是那个\"不用输密码\"的办法。",
       fields: [
         { k: "username", label: "用户名", ph: "", type: "text" },
-        { k: "password", label: "密码", ph: "", type: "password" }
+        { k: "password", label: "密码", ph: "", type: "password" },
+        { k: "cookies", label: "Cookie（走这条路就不用填密码）",
+          ph: "uoj_username=...; __client_id=...",
+          type: "textarea", wide: true }
       ]
     },
     {
       id: "luogu", name: "洛谷",
       note: "需要登录。站点有 CDN 反爬，自动登录还没打通 —— "
-          + "请用「导入 Cookie」：浏览器登录洛谷后，从开发者工具里复制 Cookie 贴进来。",
+          + "请在浏览器里登录洛谷后，把 Cookie **整条**复制进来"
+          + "（不用拆开，格式是 `名字=值; 名字=值`）。"
+          + "用户 ID 能从 Cookie 里的 _uid 自动认出来；认不出就得手填，"
+          + "它在你的洛谷主页地址里，形如 luogu.com.cn/user/123456。",
       fields: [
-        { k: "cookies", label: "Cookie", ph: "C3VK=...; __client_id=...",
-          type: "text", wide: true }
-      ],
-      importOnly: true
+        { k: "cookies", label: "Cookie", ph: "C3VK=...; __client_id=...; _uid=...",
+          type: "textarea", wide: true },
+        { k: "handle", label: "用户 ID（可留空，默认从 Cookie 的 _uid 取）",
+          ph: "例如 123456", type: "text" }
+      ]
     }
   ];
 
@@ -246,10 +256,18 @@
     var inputs = {};
 
     pf.fields.forEach(function (f) {
-      var wrap = el("div", "grow");
+      var wrap = el("div", f.wide ? "full" : "grow");
       wrap.appendChild(el("label", null, f.label));
-      var inp = el("input");
-      inp.type = f.type || "text";
+      var inp;
+      if (f.type === "textarea") {
+        // Cookie 是一长串，用单行输入框看不全也贴不利索
+        inp = el("textarea");
+        inp.rows = 3;
+        inp.spellcheck = false;
+      } else {
+        inp = el("input");
+        inp.type = f.type || "text";
+      }
       inp.placeholder = f.ph || "";
       inp.autocomplete = "off";
       // handle 已绑定时预填（后端只回 handle，不回任何凭据）

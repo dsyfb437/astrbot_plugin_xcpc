@@ -33,13 +33,15 @@
   .card .hint{ color:var(--muted); font-size:12px; margin:0 0 12px; }
   .row{ display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; }
   label{ display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
-  input{
+  input, textarea{
     width:100%; min-width:0; padding:8px 10px; font:inherit; font-size:13px;
     color:var(--fg); background:var(--bg);
     border:1px solid var(--line); border-radius:6px;
   }
-  input:focus{ outline:2px solid var(--accent); outline-offset:-1px; }
+  textarea{ min-height:64px; resize:vertical; font-family:ui-monospace,Menlo,Consolas,monospace; }
+  input:focus, textarea:focus{ outline:2px solid var(--accent); outline-offset:-1px; }
   .grow{ flex:1 1 160px; min-width:0; }
+  .full{ flex:1 1 100%; }
   button{
     font:inherit; font-size:13px; padding:8px 14px; border:0; border-radius:6px;
     background:var(--accent); color:var(--accent-fg); cursor:pointer;

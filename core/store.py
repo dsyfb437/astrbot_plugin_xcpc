@@ -29,6 +29,12 @@ from . import db as dbm
 # 合法的平台名。写错的平台名会被拒绝，而不是静静地存进去查不出来。
 PLATFORMS = ("codeforces", "atcoder", "qoj", "luogu")
 
+# 不用登录、没有凭据的平台：它们的 credentials 表里**永远不会有行**，
+# 绑定成功的唯一标志就是"users 表里有 handle"。判断绑定状态时必须认这一点，
+# 否则界面上永远是"未绑定"（v0.5.1 的真机反馈）。
+# tests/test_accounts.py 里有一条用例盯着它和 authenticator 的类型别走散。
+HANDLE_ONLY = ("codeforces", "atcoder")
+
 # 原生难度的"分数带"宽度。跨平台比较时用它，而不是直接比数值。
 BUCKET_SIZE = 200
 
@@ -187,10 +193,17 @@ class Store:
         platforms = []
         for pf in PLATFORMS:
             st = creds.get(pf) or {}
+            handle = handles.get(pf) or ""
+            status = st.get("status") or ""
+            if not status and pf in HANDLE_ONLY:
+                # CF / AtCoder 没有凭据行 —— 有 handle 就是绑好了。
+                # 之前这里只看 credentials.status，于是这两个平台
+                # 明明提示"验证通过"，卡片上却一直是"未绑定"。
+                status = "valid" if handle else "unbound"
             platforms.append({
                 "platform": pf,
-                "handle": handles.get(pf) or "",
-                "status": st.get("status") or "unbound",
+                "handle": handle,
+                "status": status or "unbound",
                 "updated_at": st.get("updated_at"),
             })
         # 注意：**只回 handle 和状态**，绝不回 cookie / 密码 / token

@@ -541,6 +541,146 @@ def test_cancel():
     asyncio.run(main())
 
 
+# ---------------------------------------------------------------------------
+# 10. 绑完得显示"已绑定"（真机反馈：CF / AtCoder 绑完还是未绑定）
+# ---------------------------------------------------------------------------
+
+def test_bound_status():
+    print("\n[10] 绑定状态（handle-only 平台 + 洛谷的 uid）")
+
+    async def main():
+        db, store, svc, _ = await setup()
+
+        # 这条盯着两边别走散：谁被当成 handle-only，谁就必须真的是 HandleOnly
+        auths = accm.default_authenticators()
+        handle_only = tuple(sorted(p for p, a in auths.items()
+                                   if isinstance(a, accm.HandleOnly)))
+        check("store.HANDLE_ONLY 和 HandleOnly 认证器一致",
+              handle_only == tuple(sorted(stm.HANDLE_ONLY)),
+              "%r vs %r" % (handle_only, stm.HANDLE_ONLY))
+
+        # --- CF：没有 credentials 行，绑定成功的标志就是那一列 handle
+        async def cf_fetch(handle, client):
+            return Fetched(ok=True, items=[Submission("codeforces", "1", "CF:1A")])
+        svc._auth["codeforces"] = accm.HandleOnly(
+            platform="codeforces", fetcher=cf_fetch)
+
+        got = await svc.start_login("qq1001", "codeforces", {"handle": "tourist"})
+        check("CF 绑定成功", got["state"] == "ok", got["message"])
+        check("CF 的 handle 落库",
+              await store.get_handle("qq1001", "codeforces") == "tourist")
+        check("CF 没有 credentials 行（它本来就不需要登录）",
+              await store.get_credentials("qq1001", "codeforces") == {})
+
+        plat = {p["platform"]: p for p in (await svc.status("qq1001"))["platforms"]}
+        check("CF 在页面上是**已绑定**，不是未绑定",
+              plat["codeforces"]["status"] == "valid", plat["codeforces"]["status"])
+        check("CF 的 handle 也回给页面了", plat["codeforces"]["handle"] == "tourist")
+        check("没绑的 AtCoder 仍然是未绑定",
+              plat["atcoder"]["status"] == "unbound", plat["atcoder"]["status"])
+
+        # 解绑必须真的解掉 —— 否则按钮点了跟没点一样
+        await svc.logout("qq1001", "codeforces")
+        plat2 = {p["platform"]: p for p in (await svc.status("qq1001"))["platforms"]}
+        check("CF 解绑后回到未绑定",
+              plat2["codeforces"]["status"] == "unbound", plat2["codeforces"]["status"])
+        check("CF 解绑后 handle 也清空了",
+              await store.get_handle("qq1001", "codeforces") == "")
+        check("解绑没波及别人",
+              await store.get_handle("qq1001", "atcoder") == "")
+
+        # --- 洛谷：uid 得从 _uid 里认出来，否则同步永远说"还没绑定 handle"
+        async def ok_verify(cookies, client):
+            return True, "验证通过"
+        luogu_auth = auths["luogu"]
+        check("洛谷的认证器认得 _uid（认不出来同步就是死的）",
+              getattr(luogu_auth, "uid_cookie", "") == "_uid", repr(luogu_auth))
+        check("洛谷要求 __client_id 这个关键字段",
+              "__client_id" in tuple(getattr(luogu_auth, "required", ())),
+              repr(getattr(luogu_auth, "required", ())))
+        luogu_auth.verifier = ok_verify     # 只换验证器，其余配置留真的
+        svc._auth["luogu"].verifier = ok_verify
+
+        r = await svc.start_login(
+            "qq1001", "luogu",
+            {"cookies": "C3VK=abc; __client_id=xyz; _uid=123456"})
+        check("洛谷导入成功", r["state"] == "ok", r["message"])
+        check("洛谷 uid 从 _uid 里认出来了",
+              await store.get_handle("qq1001", "luogu") == "123456",
+              await store.get_handle("qq1001", "luogu"))
+        check("回话里说了识别到哪些字段",
+              "解析到 3 个字段" in r["message"], r["message"])
+        check("回话里**没有**回显 cookie 的值", "abc" not in r["message"], r["message"])
+        plat3 = {p["platform"]: p for p in (await svc.status("qq1001"))["platforms"]}
+        check("洛谷页面显示已绑定",
+              plat3["luogu"]["status"] == "valid", plat3["luogu"]["status"])
+
+        # 手填的 uid 优先于 cookie 里的
+        await svc.start_login("qq2002", "luogu",
+                              {"cookies": "__client_id=xyz; _uid=999",
+                               "handle": "111"})
+        check("手填的 uid 优先",
+              await store.get_handle("qq2002", "luogu") == "111",
+              await store.get_handle("qq2002", "luogu"))
+
+        # 认不出 uid 就**失败**，不能报了成功然后同步不了
+        r3 = await svc.start_login("qq3003", "luogu", {"cookies": "__client_id=xyz"})
+        check("认不出 uid 时失败", r3["state"] == "failed", r3["message"])
+        check("失败时说清缺哪个 cookie", "_uid" in r3["message"], r3["message"])
+        check("失败时不落库", await store.get_credentials("qq3003", "luogu") == {})
+
+        # 少贴一段也要点名
+        r4 = await svc.start_login("qq4004", "luogu", {"cookies": "C3VK=abc"})
+        check("缺关键字段时点名 __client_id",
+              r4["state"] == "failed" and "__client_id" in r4["message"],
+              r4["message"])
+
+        await db.close()
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# 11. 一个平台两条登录路（QOJ：密码 或 Cookie）
+# ---------------------------------------------------------------------------
+
+def test_either_of():
+    print("\n[11] QOJ 的密码登录 / Cookie 导入两条路")
+
+    async def main():
+        db, store, svc, _ = await setup()
+
+        auth = svc._auth["qoj"]
+        check("qoj 挂的是 EitherOf", isinstance(auth, accm.EitherOf), repr(auth))
+        check("两步验证仍然可达（EitherOf 必须透传 submit_2fa）",
+              hasattr(auth, "submit_2fa"))
+        check("cookie 那条路认得 uoj_username",
+              getattr(auth.cookie_path, "uid_cookie", "") == "uoj_username")
+
+        async def ok_verify(cookies, client):
+            return True, "验证通过，拉到 2 条记录"
+        auth.cookie_path.verifier = ok_verify
+
+        r = await svc.start_login(
+            "qq1001", "qoj", {"cookies": "uoj_username=alice; __client_id=x"})
+        check("贴了 cookie 就走 cookie 那条路", r["state"] == "ok", r["message"])
+        check("QOJ 用户名落成 qoj_uid",
+              await store.get_handle("qq1001", "qoj") == "alice",
+              await store.get_handle("qq1001", "qoj"))
+        check("QOJ 凭据落库",
+              (await store.get_credentials("qq1001", "qoj")).get("__client_id") == "x")
+
+        # 不贴 cookie → 仍然走原来的密码路
+        r2 = await svc.start_login("qq2002", "qoj", {"username": "", "password": ""})
+        check("没贴 cookie 时走密码路（报用户名密码没填）",
+              r2["state"] == "failed" and r2["message"] == "用户名和密码都要填",
+              r2["message"])
+
+        await db.close()
+
+    asyncio.run(main())
+
+
 def main() -> int:
     print("=" * 62)
     print("core/accounts.py 自测（假 client，不联网）")
@@ -554,6 +694,8 @@ def main() -> int:
     test_manual_cookie()
     test_logout()
     test_cancel()
+    test_bound_status()
+    test_either_of()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)
