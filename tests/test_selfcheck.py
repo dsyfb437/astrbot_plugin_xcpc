@@ -52,7 +52,10 @@ class FakeCtx:
                 return None
             self.llm_generate = llm_generate
 
-    def get_current_chat_provider_id(self, umo=""):
+    # ⚠️ 必须 async（官方 astrbot/core/star/context.py:329）。
+    # 写成同步的话，自检里少 await 一次也会"全绿"，而真机上
+    # `str(<coroutine>)` 非空 → 自检谎报"模型 OK"。见 test_provider_id_is_awaited。
+    async def get_current_chat_provider_id(self, umo=""):
         return self._pid
 
 
@@ -108,8 +111,18 @@ def test_healthy():
                   for i in r.items))
         check("数据库检查通过",
               any(i.name == "数据库" and i.status == scm.OK for i in r.items))
-        check("模型检查通过",
-              any(i.name == "模型" and i.status == scm.OK for i in r.items))
+        # ⚠️ 这里原来只断言 status == OK —— 那**拦不住** coroutine 那个坑：
+        # 同步调 async 的 getter 拿回 coroutine 对象，`str()` 之后非空，
+        # 状态照样是 OK，只是 detail 变成了 "<coroutine object ...>"。
+        # 自检说 OK 的地方就必须真的能跑，所以连 detail 一起查。
+        m = [i for i in r.items if i.name == "模型"]
+        check("模型检查通过", bool(m) and m[0].status == scm.OK,
+              repr([(i.name, i.status, i.detail) for i in m]))
+        check("模型那一行写的是真的模型名", bool(m) and m[0].detail == "fake-model",
+              repr(m[0].detail if m else None))
+        check("模型那一行不是 coroutine",
+              bool(m) and "coroutine" not in m[0].detail,
+              repr(m[0].detail if m else None))
         check("路由检查通过（认得出是我的路由）",
               any(i.name == "Web 路由" and i.status == scm.OK for i in r.items))
         await db.close()

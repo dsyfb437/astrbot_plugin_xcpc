@@ -6,7 +6,10 @@
 ------------------------------------
     context.llm_generate(*, chat_provider_id, system_prompt, prompt,
                          contexts, tools, **kw) -> LLMResponse   # v4.5.7+
-    context.get_current_chat_provider_id(umo) -> str
+    coroutine context.get_current_chat_provider_id(umo) -> str  # ← async！
+
+**`get_current_chat_provider_id` 是协程，必须 await** —— 别直接调它，
+用 :func:`current_provider_id`。踩过一次，见那个函数的 docstring。
 
 `llm_generate` **不会自动执行工具调用**（官方 docstring 明说），
 要工具循环得用 `tool_loop_agent`。我们这里不需要 ——
@@ -31,6 +34,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from dataclasses import dataclass, field
@@ -281,6 +285,44 @@ def validate(data: dict, candidates: list[dict], *,
     return plan
 
 
+async def current_provider_id(context, umo: str = "") -> str:
+    """取当前会话说该用哪个模型。拿不到就返回空串（不抛）。
+
+    ⚠️ **为什么单独有这个函数**
+    --------------------------
+    `Context.get_current_chat_provider_id` 是 **async** 的
+    （官方 4.28.2 `astrbot/core/star/context.py:329`：
+
+        async def get_current_chat_provider_id(self, umo: str) -> str
+
+    ）。而这里原来写的是同步调用：
+
+        provider_id = context.get_current_chat_provider_id(umo) or ""
+
+    拿回来的是个 **coroutine 对象**。coroutine 是**真值**，`or ""` 兜不住它，
+    于是它被原样当成 provider id 传给了 `llm_generate`。用户 2026-10-08
+    07:42 在真机上看到的就是这个：
+
+        ProviderNotFoundError: Provider <coroutine object
+        Context.get_current_chat_provider_id at 0x7f7d4008a9b0> not found
+
+    **为什么测试没拦住**：所有测试替身都把它写成同步方法，跟真身不一致。
+    `tests/test_main_static.py` 的注释里明明抄着官方签名（`async def ...`），
+    可替身是照着"我们的调用方式"写的，不是照着官方签名写的 —— 于是替身和
+    真身一起错，测试全绿。现在替身一律改成 async，并且额外测一条"同步的
+    也能用"，两种都得过。
+
+    `inspect.isawaitable` 两种都认，这样 AstrBot 哪天改回同步也不会再炸一次。
+    """
+    getter = getattr(context, "get_current_chat_provider_id", None)
+    if getter is None:
+        return ""
+    got = getter(umo)
+    if inspect.isawaitable(got):
+        got = await got
+    return str(got or "").strip()
+
+
 async def generate(context, *, summary_text: str, candidates: list[dict],
                    model_id: str = "", umo: str = "", feedback_hint: str = "",
                    constraints: str = "", max_minutes: int = 200,
@@ -300,7 +342,7 @@ async def generate(context, *, summary_text: str, candidates: list[dict],
     provider_id = (model_id or "").strip()
     if not provider_id:
         try:
-            provider_id = context.get_current_chat_provider_id(umo) or ""
+            provider_id = await current_provider_id(context, umo)
         except Exception:
             provider_id = ""
     if not provider_id:

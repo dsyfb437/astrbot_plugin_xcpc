@@ -68,7 +68,10 @@ class FakeContext:
         self._raw_obj = raw_obj
         self.calls = []
 
-    def get_current_chat_provider_id(self, umo=""):
+    # ⚠️ 官方就是 async（astrbot/core/star/context.py:329）。替身写成同步的话，
+    # 我们少 await 一次也照样全绿 —— 2026-10-08 真机报
+    # `Provider <coroutine object ...> not found` 就是这么漏掉的。
+    async def get_current_chat_provider_id(self, umo=""):
         return self._provider
 
     async def llm_generate(self, **kw):
@@ -322,6 +325,116 @@ def test_prompt():
           "不要当成" in llmm.SYSTEM_PROMPT)
 
 
+# ---------------------------------------------------------------------------
+# 9. provider id —— 官方那个方法是 async，别同步调
+# ---------------------------------------------------------------------------
+
+def test_provider_id():
+    """2026-10-08 真机踩的坑：`get_current_chat_provider_id` 是**协程**。
+
+    同步调它拿回来的是 coroutine 对象。coroutine 是**真值**，`or ""` 兜不住，
+    于是它被当成 provider id 传给了 `llm_generate`，用户看到的是
+
+        ProviderNotFoundError: Provider <coroutine object
+        Context.get_current_chat_provider_id at 0x7f7d4008a9b0> not found
+
+    为什么 958 项测试全绿也没拦住：**替身照着我们的调用方式写的，不是照着
+    官方签名写的**，替身和真身一起错。现在替身一律 async，这里再把
+    调用点本身钉死 —— async 的必须 await 出真值，同步的（万一哪天改回去）
+    也得能用，而且**绝不能**把 coroutine 当 id 传出去。
+    """
+    print("\n[9] provider id —— 官方那个方法是 async")
+
+    async def pid_of(ctx):
+        return await llmm.current_provider_id(ctx, "")
+
+    class AsyncGetter:
+        async def get_current_chat_provider_id(self, umo=""):
+            return "  async-model  "
+
+    class SyncGetter:
+        # 老版本 / 将来改回同步 —— 两种都得认
+        def get_current_chat_provider_id(self, umo=""):
+            return "sync-model"
+
+    class NoneGetter:
+        async def get_current_chat_provider_id(self, umo=""):
+            return None
+
+    class NoGetter:
+        pass
+
+    class BoomGetter:
+        async def get_current_chat_provider_id(self, umo=""):
+            raise RuntimeError("炸了")
+
+    check("async getter 被 await 出真值",
+          asyncio.run(pid_of(AsyncGetter())) == "async-model",
+          repr(asyncio.run(pid_of(AsyncGetter()))))
+    check("同步 getter 也认（inspect.isawaitable 兜底）",
+          asyncio.run(pid_of(SyncGetter())) == "sync-model")
+    check("返回 None → 空串，不是字符串 'None'",
+          asyncio.run(pid_of(NoneGetter())) == "")
+    check("没有这个方法 → 空串（老 AstrBot）",
+          asyncio.run(pid_of(NoGetter())) == "")
+
+    try:
+        asyncio.run(pid_of(BoomGetter()))
+        check("getter 抛错时不吞（交给 generate 兜）", False, "居然没抛")
+    except RuntimeError:
+        check("getter 抛错时不吞（交给 generate 兜）", True)
+
+    # ★ 端到端：传出去的必须是普通字符串，不能是 coroutine
+    ok_payload = json.dumps({"assessment": "x", "tasks": [], "watch": ""})
+    ctx = FakeContext(text=ok_payload)
+    run(ctx)
+    got = ctx.calls[0].get("chat_provider_id")
+    check("过了一遍 generate 之后仍是字符串", isinstance(got, str),
+          repr(type(got)))
+    check("过了一遍 generate 之后不是 coroutine",
+          not asyncio.iscoroutine(got), repr(got))
+    check("就是 provider 名字", got == "fake-provider", repr(got))
+
+    # getter 炸了 → 应该是那句人话的「没模型」，不是把整个方案带崩
+    class BoomCtx(FakeContext):
+        async def get_current_chat_provider_id(self, umo=""):
+            raise RuntimeError("context 炸了")
+
+    try:
+        run(BoomCtx(text=ok_payload))
+        check("getter 炸了 → 报「没模型」而不是崩", False, "居然没抛 LLMError")
+    except llmm.LLMError as exc:
+        check("getter 炸了 → 报「没模型」而不是崩",
+              "llm_provider_id" in str(exc), str(exc))
+
+    # 静态守卫：生产代码里除 core/llm.py 自己，谁都不准直接碰这个方法。
+    # （测试文件里那一堆是**替身定义**，不在此列。）
+    root = os.path.dirname(HERE)
+    hits = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in ("__pycache__", ".git", "data", "tests",
+                                    "pages")]
+        for fn in filenames:
+            if not fn.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, fn)
+            rel = os.path.relpath(path, root).replace(os.sep, "/")
+            if rel == "core/llm.py":
+                continue
+            with open(path, encoding="utf-8") as fh:
+                if "get_current_chat_provider_id(" in fh.read():
+                    hits.append(rel)
+    check("生产代码里除 core/llm.py 外没人直接调它", not hits, ", ".join(hits))
+
+    # 我们自己那份声明也别写错 —— 文档里写错了下一个人就照着错
+    with open(os.path.join(root, "core", "llm.py"), encoding="utf-8") as fh:
+        src = fh.read()
+    check("llm.py 自己的文档里标了它是 async", "async！" in src or "协程" in src)
+    check("llm.py 里确实 await 了它", "await current_provider_id(" in src
+          or "provider_id = await current_provider_id" in src)
+
+
 def main() -> int:
     print("=" * 62)
     print("core/llm.py 自测（假 provider，不调真模型）")
@@ -334,6 +447,7 @@ def main() -> int:
     test_unknown_response()
     test_dirty_input()
     test_prompt()
+    test_provider_id()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

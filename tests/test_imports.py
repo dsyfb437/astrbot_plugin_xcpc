@@ -145,7 +145,8 @@ _PKG_SCRIPT = textwrap.dedent('''
             self.registered_web_apis = []
         def register_web_api(self, route, handler, methods, desc):
             self.registered_web_apis.append((route, handler, methods, desc))
-        def get_current_chat_provider_id(self, umo=""):
+        # 官方是 async（astrbot/core/star/context.py:329）。
+        async def get_current_chat_provider_id(self, umo=""):
             return ""
 
     astrbot = types.ModuleType("astrbot")

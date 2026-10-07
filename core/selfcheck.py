@@ -23,6 +23,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from . import llm as llmm
+
 # 检查结果的三档：好 / 提醒 / 有问题
 OK = "ok"
 WARN = "warn"
@@ -300,9 +302,12 @@ async def run(*, store=None, db=None, recorder=None, context=None,
         try:
             pid = str(config.get("llm_provider_id") or "").strip()
             if not pid:
-                getter = getattr(context, "get_current_chat_provider_id", None)
-                if getter:
-                    pid = str(getter(umo) or "").strip()
+                # ⚠️ 必须走 llmm.current_provider_id —— 官方那个方法是 **async**。
+                # 这里原来同步调它，拿回来的是 coroutine 对象，`str()` 之后
+                # 变成 "<coroutine object ...>"，非空 → 自检**报"模型 OK"**，
+                # 用户拿着这份绿色的自检报告去发 /xcpc 方案，然后炸在
+                # ProviderNotFoundError 上。自检说 OK 的地方就必须真的能跑。
+                pid = await llmm.current_provider_id(context, umo)
         except Exception as exc:
             r.add("模型", BAD, "取模型 id 时出错：%s" % exc)
         if pid:

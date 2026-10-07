@@ -602,6 +602,66 @@ def test_api_contract() -> None:
     check("没有用未核对过的 event 成员", not used, "用了：%s" % used)
 
 
+    # ⑥ 官方声明是 async 的 API，调用点上**必须 await**
+    #
+    # **为什么单列这一条**：2026-10-08 真机炸的就是这里。
+    # `get_current_chat_provider_id` 官方是 async —— 本测试的 docstring 里
+    # 早就抄着 `async def get_current_chat_provider_id(self, umo: str) -> str
+    # # :329` 了，可**调用点**是同步调的。拿回来的是 coroutine 对象，
+    # coroutine 是**真值**，`or ""` 兜不住它，于是它被当成 provider id
+    # 传给了 `llm_generate`，用户看到的是：
+    #
+    #   ProviderNotFoundError: Provider <coroutine object
+    #   Context.get_current_chat_provider_id at 0x7f7d4008a9b0> not found
+    #
+    # 958 项测试全绿也没拦住，因为**测试替身也写成了同步** ——
+    # 替身是照着"我们的调用方式"写的，不是照着官方签名写的，
+    # 于是替身和真身一起错。教训：**签名写进文档不等于调用点被检查过。**
+    # 所以这条**不看替身**，只查生产源码的调用点：名字在 ASYNC_APIS 里的，
+    # 调用表达式必须整个处在 await 之下。
+    ASYNC_APIS = {"llm_generate", "get_current_chat_provider_id",
+                  "current_provider_id", "get_kv_data", "put_kv_data",
+                  "send_message"}
+    prod_src = {}
+    for sub in ("core", "platforms", ""):
+        d = os.path.join(PLUGIN, sub) if sub else PLUGIN
+        if not os.path.isdir(d):
+            continue
+        for fn in sorted(os.listdir(d)):
+            if fn.endswith(".py"):
+                p = os.path.join(d, fn)
+                rel = os.path.relpath(p, PLUGIN).replace("\\", "/")
+                prod_src[rel] = io.open(p, encoding="utf-8").read()
+    check("⑥ 扫到了生产源码", len(prod_src) >= 10, "%d 个" % len(prod_src))
+
+    missing = []
+    for rel, src in sorted(prod_src.items()):
+        try:
+            tree = ast.parse(src)
+        except SyntaxError as exc:
+            missing.append("%s 解析不了：%s" % (rel, exc))
+            continue
+        # 先收集所有 await 子树里的节点
+        awaited = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Await):
+                for sub in ast.walk(node.value):
+                    awaited.add(id(sub))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Attribute):
+                name = node.func.attr
+            elif isinstance(node.func, ast.Name):
+                name = node.func.id
+            else:
+                continue
+            if name in ASYNC_APIS and id(node) not in awaited:
+                missing.append("%s:%d %s()" % (rel, node.lineno, name))
+    check("⑥ 官方是 async 的 API 上都 await 了", not missing,
+          "没 await 的：%s" % missing)
+
+
 def main() -> int:
     print("=" * 62)
     print("main.py 静态检查")

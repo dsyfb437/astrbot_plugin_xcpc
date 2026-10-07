@@ -60,7 +60,8 @@ class FakeContext:
         self._exc = exc
         self.calls = []
 
-    def get_current_chat_provider_id(self, umo=""):
+    # 官方是 async（astrbot/core/star/context.py:329），替身照签名写。
+    async def get_current_chat_provider_id(self, umo=""):
         return "fake"
 
     async def llm_generate(self, **kw):
