@@ -1094,6 +1094,10 @@ def test_push_train():
         check("train 插在标题之后、复盘提醒之前",
               with_t.index("🌙 今天的收尾") < with_t.index("XX方案XX")
               < with_t.index("复盘"), with_t)
+        # 真机 dry-run 发现过两个连续空行（手机上一段话被劈成两半）——
+        # 钉死：方案段和复盘提醒之间**只能有一个**空行。
+        check("方案段和复盘提醒之间只有一个空行",
+              "\n\n\n" not in with_t, repr(with_t))
 
         # --- _push_once：每个目标单独组装 ---
         uid = "qq1001"

@@ -2659,11 +2659,15 @@ def format_push(st: dict, today: dict, reviewed: bool, train: str = "") -> str:
     """
     lines = ["🌙 今天的收尾", ""]
     if train:
+        # **不要在 train 后面无条件补空行** —— 下面和"复盘提醒"之间本来就会
+        # 留一个空行，两边都补就变成两个空行（真机 dry-run 里看出来的：
+        # 手机上一段话被劈成两半）。
         lines.append(train)
-        lines.append("")
 
     nc = st.get("next_contest")
     if nc:
+        if train:
+            lines.append("")
         lines.append("⏳ %s 还有 %d 天" % (nc["name"], nc["days"]))
 
     items = today.get("items") or []
