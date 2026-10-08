@@ -120,6 +120,29 @@ def test_happy():
     text = plan.to_text()
     check("文本里有人话标签", "学新算法" in text and "做题" in text, text[:200])
 
+    # ---- to_markdown：图片版排版（v0.5.16）----
+    #
+    # 为什么单独立一组断言：to_text() 里 why 靠 6 个空格缩进挂在上一行下面，
+    # markdown 会把那行当成**同一段的续行**，渲染时几条任务并成一大坨。
+    # 这里钉死 markdown 版必须用"- "列表项 + 空行 + 缩进正文"的写法。
+    md = plan.to_markdown()
+    check("markdown 版是列表项", md.count("- **[") == 2,
+          "有 %d 个列表项" % md.count("- **["))
+    check("markdown 版有人话标签", "**[做题]**" in md and "**[学新算法]**" in md,
+          md[:200])
+    check("markdown 版有小标题", "## 今天的任务" in md and "## 下次注意" in md,
+          md[:200])
+    check("why 前面有空行（不然会被当成续行并成一段）",
+          "\n\n  " in md, repr(md[:400]))
+    check("没有 to_text() 那种 6 空格续行",
+          "\n      " not in md, repr(md[:400]))
+    check("题号和分钟都在", "CF:1900D" in md and "（45 分钟）" in md, md[:300])
+    check("纯文本版一个字没变（还是老写法）",
+          "\n      " in text and "- **[" not in text, text[:200])
+    check("两个版本正文一致（都含 assessment 和 watch）",
+          plan.assessment in md and plan.watch in md and plan.watch in text)
+    check("markdown 版结尾没有多余空行", md == md.rstrip(), repr(md[-30:]))
+
 
 # ---------------------------------------------------------------------------
 # 2. 编造题号

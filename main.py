@@ -1234,22 +1234,26 @@ class XcpcPlugin(Star):
         event.should_call_llm(False)
 
     async def _long_reply(self, event: AstrMessageEvent, text: str, flag: str,
-                          title: str = ""):
+                          title: str = "", md: str = ""):
         """发一段长文本：开了对应开关就渲染成图片，否则按行切条。
 
         为什么要有这条路：QQ 不渲染 markdown，几百字连成一段在手机上就是一坨，
         超过 `max_reply_chars` 还会被切成好几条。文转图是一张图看完，
         排版稳定、不会被截断。
 
-        `title` 只加在图片上：聊天里机器人自己的消息已经带上下文，
-        图片是一张独立的东西，没标题会不知道是哪天的什么。
+        `title` / `md` 只作用于图片：标题在聊天里是多余的（机器人自己的消息
+        已经带上下文），图片是一张独立的东西，没标题会不知道是哪天的什么；
+        `md` 是同一个内容的 markdown 排版（见 `Plan.to_markdown`），
+        纯文本那条路还是用 `text`。
 
         **失败一定退回文本**：t2i 依赖 AstrBot 那边的配置（`t2i_strategy`），
         用户没配好时不能让他什么都收不到 —— 收到一坨字也比收到报错强。
         """
-        if self.config.get(flag, False) and text.strip():
+        if self.config.get(flag, False) and (md or text).strip():
             try:
-                body = ("# %s\n\n%s" % (title, text)) if title else text
+                body = md or text
+                if title:
+                    body = "# %s\n\n%s" % (title, body)
                 url = await self.text_to_image(body)
                 yield event.image_result(url)
                 return
@@ -2024,14 +2028,16 @@ class XcpcPlugin(Star):
                 head += "\n\n看 /xcpc 日志 30 有细节。"
             yield event.plain_result(head)
             if result.plan:
-                async for r in self._long_reply(event, result.plan.to_text(),
-                                                "plan_as_image",
-                                                title="上一次的方案（没重新生成）"):
+                async for r in self._long_reply(
+                        event, result.plan.to_text(), "plan_as_image",
+                        title="上一次的方案（没重新生成）",
+                        md=result.plan.to_markdown()):
                     yield r
             return
 
         async for r in self._long_reply(event, result.plan.to_text(),
-                                        "plan_as_image", title="今日方案"):
+                                        "plan_as_image", title="今日方案",
+                                        md=result.plan.to_markdown()):
             yield r
 
     @xcpc.command("反馈", alias={"feedback", "说一句"})

@@ -732,11 +732,11 @@ def test_long_reply_image():
     """
     print("\n[7] 长文本：开关开了发图，失败退回文本")
 
-    async def drive_long(p, text, flag, title="", **conf):
+    async def drive_long(p, text, flag, title="", md="", **conf):
         for k, v in conf.items():
             p.config[k] = v
         ev = FakeEvent(message="")
-        async for _ in p._long_reply(ev, text, flag, title=title):
+        async for _ in p._long_reply(ev, text, flag, title=title, md=md):
             pass
         return ev
 
@@ -768,7 +768,24 @@ def test_long_reply_image():
         check("图里是完整正文（没被截断）",
               bool(p.t2i_calls) and long_text in p.t2i_calls[0])
 
-        # ③ 没配文转图 → **必须退回文本**，不能让他什么都收不到
+        # ③ 有 markdown 版时，图用它、文本用原来那份（两条路不能互相污染）
+        p.t2i_calls = []
+        ev = await drive_long(p, "纯文本正文\n      缩进续行", "plan_as_image",
+                              title="今日方案", md="# 不用管这个标题\n\n- **【做题】** 正文",
+                              plan_as_image=True)
+        check("有 md 时图里用 md", p.t2i_calls ==
+              ["# 今日方案\n\n# 不用管这个标题\n\n- **【做题】** 正文"],
+              repr(p.t2i_calls[:1])[:200])
+        check("有 md 时图里不出现纯文本版", "缩进续行" not in (p.t2i_calls[0] if p.t2i_calls else ""))
+        p.t2i_calls = []
+        ev = await drive_long(p, "纯文本正文\n      缩进续行", "plan_as_image",
+                              title="今日方案", md="# 不用管这个标题",
+                              plan_as_image=False)
+        check("关着开关时仍然发纯文本版（不是 md）",
+              "缩进续行" in ev.text and "不用管这个标题" not in ev.text,
+              ev.text[:120])
+
+        # ④ 没配文转图 → **必须退回文本**，不能让他什么都收不到
         p.t2i_fail = True
         ev = await drive_long(p, "短一点的方案", "plan_as_image",
                               title="今日方案", plan_as_image=True)
@@ -777,13 +794,13 @@ def test_long_reply_image():
         check("文转图失败时不假装发了图", "[image]" not in ev.text, ev.text[:120])
         p.t2i_fail = False
 
-        # ④ 正文是空的 → 不发图（一张空白图没有意义）
+        # ⑤ 正文是空的 → 不发图（一张空白图没有意义）
         p.t2i_calls = []
         ev = await drive_long(p, "   \n  ", "plan_as_image",
                               title="今日方案", plan_as_image=True)
         check("正文为空时不发图", not p.t2i_calls, repr(p.t2i_calls[:1]))
 
-        # ⑤ 两个开关互不串台
+        # ⑥ 两个开关互不串台
         p.t2i_calls = []
         ev = await drive_long(p, "状态正文", "status_as_image",
                               title="XCPC 状态", status_as_image=True)
@@ -797,13 +814,15 @@ def test_long_reply_image():
         check("关掉 status_as_image 后回到文本",
               "[image]" not in ev.text and "状态正文" in ev.text, ev.text[:80])
 
-        # ⑥ 两个命令真的接到了这条路上（钉住接线，别只测了工具函数）
+        # ⑦ 两个命令真的接到了这条路上（钉住接线，别只测了工具函数）
         src = open(os.path.join(os.path.dirname(__file__), "..", "main.py"),
                    encoding="utf-8").read()
         check("cmd_status 走 _long_reply", 'text, "status_as_image"' in src)
         check("cmd_plan 走 _long_reply 且用 plan_as_image",
-              'result.plan.to_text(),\n                                        "plan_as_image"' in src
-              or '"plan_as_image"' in src)
+              '"plan_as_image"' in src)
+        check("cmd_plan 两条路都传了 markdown 版",
+              src.count("md=result.plan.to_markdown()") == 2,
+              "传了 %d 次" % src.count("md=result.plan.to_markdown()"))
         check("旧的内联发图代码没留两份",
               src.count("await self.text_to_image(") == 1,
               "有 %d 处" % src.count("await self.text_to_image("))

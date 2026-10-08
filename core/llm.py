@@ -81,6 +81,22 @@ class Task:
             text += "\n      %s" % self.why
         return "  " + text
 
+    def bullet(self) -> str:
+        """markdown 列表项（图片版用，见 `Plan.to_markdown`）。"""
+        label = KIND_LABEL.get(self.kind, self.kind)
+        bits = ["**[%s]** %s" % (label, self.title)]
+        if self.problem:
+            bits.append("→ %s" % self.problem)
+        if self.minutes:
+            bits.append("（%d 分钟）" % self.minutes)
+        text = "- " + " ".join(bits)
+        if self.why:
+            # 空行 + 两空格缩进：markdown 里这才是"同一个列表项的第二段"。
+            # 写成 to_text() 那样的 "\n      "（无空行）会被当成续行，
+            # 渲染时四行并成一大坨 —— v0.5.16 真机踩过。
+            text += "\n\n  %s" % self.why
+        return text
+
 
 @dataclass
 class Plan:
@@ -115,6 +131,36 @@ class Plan:
         if self.problems:
             L += ["", "⚠ 有几处我没法确认，已标出："]
             L += ["  · %s" % p for p in self.problems]
+        return "\n".join(L)
+
+    def to_markdown(self) -> str:
+        """给文转图用的 markdown 版本。
+
+        为什么不直接拿 `to_text()` 去渲染：图片是按 markdown 解析的，而
+        `to_text()` 里每条任务的 why 靠 6 个空格缩进挂在上一行下面 ——
+        markdown 会把它当成**同一段的续行**，四条内容并成一大坨，
+        整个任务清单糊掉（v0.5.16 真机上就是这么糊的）。
+
+        这里改成 `- **[做题]** 标题 → 题目（分钟）` + 空行 + 缩进正文，
+        渲染出来是清清楚楚的列表；标题和「下次注意」用小标题分开。
+        纯文本那条路仍然走 `to_text()`，一个字没动。
+        """
+        L = []
+        if self.assessment:
+            L += [self.assessment, ""]
+        if self.tasks:
+            L += ["## 今天的任务", ""]
+            for t in self.tasks:
+                L += [t.bullet(), ""]
+        else:
+            L += ["（这次没给出任务）", ""]
+        if self.watch:
+            L += ["## 下次注意", "", self.watch, ""]
+        if self.problems:
+            L += ["## ⚠ 有几处我没法确认", ""]
+            L += ["- %s" % p for p in self.problems]
+        while L and not L[-1].strip():
+            L.pop()
         return "\n".join(L)
 
 
