@@ -292,10 +292,14 @@ class Loop:
         return LoopResult(ok=True, plan=plan, summary_text=info.to_text(),
                           candidates=len(candidates))
 
-    async def get_latest_plan(self, user_id: str) -> llmm.Plan | None:
-        """取最近一版方案。用于"失败时展示上一版"。"""
+    async def get_latest_plan(self, user_id: str, date: str = "") -> llmm.Plan | None:
+        """取最近一版方案。用于"失败时展示上一版"。
+
+        `date` 不为空时只要那一天的（推送用 —— 它要的是**今天**那版，
+        而不是"最近一版"，两者在跨天的时候不是一回事）。
+        """
         import json
-        row = await self.store.latest_plan(user_id)
+        row = await self.store.latest_plan(user_id, date)
         if not row:
             return None
         try:

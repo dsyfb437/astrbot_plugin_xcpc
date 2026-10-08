@@ -69,14 +69,22 @@ class Task:
     minutes: int = 0
     why: str = ""
 
-    def line(self) -> str:
+    def short(self) -> str:
+        """一行紧凑版：标题、题号、时长，**不要 why**。
+
+        推送用（每天 22:30 那条）—— 那里是手机上一眼扫过去的地方，
+        理由留到方案正文里说。`line()` 也用它，保证两处格式不会各自漂移。
+        """
         label = KIND_LABEL.get(self.kind, self.kind)
         bits = ["[%s] %s" % (label, self.title)]
         if self.problem:
             bits.append("→ %s" % self.problem)
         if self.minutes:
             bits.append("（%d 分钟）" % self.minutes)
-        text = " ".join(bits)
+        return " ".join(bits)
+
+    def line(self) -> str:
+        text = self.short()
         if self.why:
             text += "\n      %s" % self.why
         return "  " + text

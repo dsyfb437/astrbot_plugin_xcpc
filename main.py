@@ -2370,22 +2370,68 @@ class XcpcPlugin(Star):
             today = self.backend.today_tasks()
             if asyncio.iscoroutine(today):
                 today = await today
-            text = format_push(st, today, await self._today_reviewed())
+            reviewed = await self._today_reviewed()
         except Exception as exc:
             logger.error("[xcpc] 组装推送内容失败: %s", exc)
             return 0, len(targets)
 
-        chain = MessageChain().message(text)
         sent = 0
         for umo in targets:
+            # 每个目标单独组装 —— 训练数据是**按人**的，群聊取不到 uid
+            # 就只发公共那部分（见 `_uid_from_umo`）。
+            text = format_push(st, today, reviewed)
+            uid = _uid_from_umo(umo)
+            if uid:
+                try:
+                    train = await self._push_train_text(uid)
+                except Exception as exc:            # noqa: BLE001
+                    logger.warning("[xcpc] 推送取训练数据失败（照常发）: %s", exc)
+                    train = ""
+                if train:
+                    text = format_push(st, today, reviewed, train=train)
             try:
-                await self.context.send_message(umo, chain)
+                await self.context.send_message(umo, MessageChain().message(text))
                 sent += 1
             except Exception as exc:
                 # 平台不支持主动消息（例如 qq_official）就会走到这里。
                 # 只记日志、不影响其它目标，也不让推送循环挂掉。
                 logger.error("[xcpc] 推送到 %s 失败: %s", umo, exc)
         return sent, len(targets)
+
+    async def _push_train_text(self, uid: str) -> str:
+        """推送里"这个人的训练数据"那一段。**取不到就返回空串，不炸推送。**
+
+        v0.5.23 补的。在此之前 `_push_once` 只读老的 file 工作区后端
+        （`workspace/00-plan/sprint.md` 那种手写 Markdown），而真正在用的
+        方案引擎把方案存在 `plans` 表里 —— 两套东西互不相干，结果是
+        每天 22:30 只发一句"今天还没记复盘"，**方案一个字都没有**。
+        """
+        store, err = self._store_or_error()
+        if err or not uid or self.loop is None:
+            return ""
+        day = today_cn()
+        plan = None
+        try:
+            plan = await self.loop.get_latest_plan(uid, day)
+        except Exception as exc:                    # noqa: BLE001
+            logger.warning("[xcpc] 推送取今日方案失败: %s", exc)
+        checkin = None
+        try:
+            rows = await store.task_log(uid, days=1)
+            # 最近一条**不一定是今天**的 —— 不判日期的话，昨天打的卡
+            # 会被当今天的，推送就会说"今天已打卡"。
+            if rows and str(rows[0]["date"]) == day:
+                checkin = dict(rows[0])
+        except Exception as exc:                    # noqa: BLE001
+            logger.warning("[xcpc] 推送取打卡记录失败: %s", exc)
+        act = None
+        try:
+            act = await store.activity(uid)
+        except Exception as exc:                    # noqa: BLE001
+            logger.warning("[xcpc] 推送取活跃度失败: %s", exc)
+        if plan is None and checkin is None and not act:
+            return ""
+        return format_push_train(plan, checkin, act)
 
     async def _today_reviewed(self) -> bool:
         """今天记过复盘没有 —— 推送里要用这句话来催。
@@ -2537,9 +2583,84 @@ def format_status(st: dict, handle: str) -> str:
     return "\n".join(out)
 
 
-def format_push(st: dict, today: dict, reviewed: bool) -> str:
-    """每天晚上那条推送的内容。"""
+def _uid_from_umo(umo: str) -> str:
+    """从会话 ID 里取用户 QQ 号。**只对私聊有效，群聊一律返回空串。**
+
+    `default:FriendMessage:3085596249` → `3085596249`
+    `default:GroupMessage:123456`     → `""`（123456 是**群号**，不是人）
+
+    群里那段是群号 —— 拿它当 uid 会把整个群的数据串成一个人的，
+    和 `_uid()` 里记的那个坑是同一个。所以这里**只认 FriendMessage**，
+    认不出来就返回空串，推送退化成"发公共那部分"。
+    """
+    parts = str(umo or "").split(":")
+    if len(parts) >= 3 and parts[-2] == "FriendMessage":
+        return parts[-1].strip()
+    return ""
+
+
+def format_push_train(plan, checkin: dict | None, act: dict | None) -> str:
+    """推送里"训练"那一段 —— 数据来自插件自己的库。
+
+    v0.5.23 补的。在这之前推送只读老的 file 工作区
+    （`workspace/00-plan/sprint.md` 那种手写 Markdown），而真正在用的
+    方案引擎把方案存在 `plans` 表里 —— 于是每天 22:30 发出去的只有
+    一句催复盘，**方案、打卡、提交一条都没有**。
+
+    `plan` 是 `llm.Plan` 或 None；`checkin` 是今天那行 `task_log`；
+    `act` 是 `store.activity()`。**都取不到时返回空串**，让调用方
+    退回老格式，而不是发一段"暂无数据"。
+    """
+    lines = []
+    tasks = list(getattr(plan, "tasks", None) or []) if plan is not None else []
+    if tasks:
+        lines.append("📅 今天的方案（%d 项）" % len(tasks))
+        for t in tasks:
+            try:
+                lines.append("· " + t.short())
+            except Exception:                       # noqa: BLE001
+                continue
+    if plan is not None or checkin is not None:
+        st = str((checkin or {}).get("status") or "")
+        label = {"done": "做完了", "partial": "做了一半", "skipped": "没做"}.get(st)
+        if label:
+            # 打了卡就先认下来 —— **哪怕今天没出方案**。他做完了事
+            # 系统一声不吭，是最伤人的那种"没反应"。
+            note = str((checkin or {}).get("note") or "").strip()
+            lines.append("✅ 今天已打卡：%s%s"
+                         % (label, "（%s）" % note if note else ""))
+        elif plan is not None:
+            # `task_log` 里没有今天 —— **这是"没数据"，不是"没做"**。
+            # 所以只说"还没打卡"，不推断他偷懒（v0.5.15 的教训）。
+            lines.append("☐ 今天还没打卡 —— 做完发一句 `/xcpc 打卡`。")
+    if act:
+        n = int(act.get("today_sub") or 0)
+        if n:
+            lines.append("🔥 今天交了 %d 条，AC %d 条。" % (n, int(act.get("today_ac") or 0)))
+            if int(act.get("streak") or 0) >= 2:
+                lines.append("连续活跃 %d 天。" % int(act["streak"]))
+        else:
+            gap = act.get("days_since_last")
+            # `gap == 0` 在"今天没提交"的分支里是自相矛盾的，但真
+            # 出现时宁可说"还没有提交"，也不要说"已经 0 天没提交"。
+            if gap:
+                lines.append("💤 今天还没有提交（最近一次在 %d 天前）。" % gap)
+            else:
+                lines.append("💤 今天还没有提交。")
+    return "\n".join(lines)
+
+
+def format_push(st: dict, today: dict, reviewed: bool, train: str = "") -> str:
+    """每天晚上那条推送的内容。
+
+    `train` 是插件自己的训练数据那一段（`format_push_train` 的输出）——
+    **那才是这个插件真正在做的事**。默认空串时行为和以前一模一样，
+    因为老的 file 后端（真去手写 `sprint.md` 的人）也还要能用。
+    """
     lines = ["🌙 今天的收尾", ""]
+    if train:
+        lines.append(train)
+        lines.append("")
 
     nc = st.get("next_contest")
     if nc:

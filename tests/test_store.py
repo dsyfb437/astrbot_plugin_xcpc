@@ -26,6 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 from core import db as dbm          # noqa: E402
+from core import log as logm         # noqa: E402
 from core import store as stm       # noqa: E402
 from platforms.base import ContestRecord, Problem, Submission  # noqa: E402
 
@@ -543,6 +544,85 @@ def test_task_log():
     asyncio.run(main())
 
 
+# ---------------------------------------------------------------------------
+# 9. 活跃度（每日推送的数据来源）
+# ---------------------------------------------------------------------------
+
+def test_activity():
+    print("\n[9] 活跃度：今天的提交 / 连续天数")
+
+    async def main():
+        db, s = new_store()
+        await db.open()
+
+        # 没数据时必须是个**全 0 的空壳**，不能抛异常 —— 推送靠它决定说什么
+        act = await s.activity("nobody")
+        check("没数据时不炸", isinstance(act, dict), repr(act))
+        check("没数据时 today_sub / streak 都是 0",
+              act["today_sub"] == 0 and act["streak"] == 0
+              and act["last_epoch"] == 0, repr(act))
+        check("没数据时 days_since_last 是 None（不是 0 —— 那会读成「今天来过」）",
+              act["days_since_last"] is None, repr(act["days_since_last"]))
+
+        day = logm.now_cn().replace(hour=0, minute=0, second=0, microsecond=0)
+        mid = int(day.timestamp())
+        D = 86400
+
+        # 今天 3 条（2 条算 AC）、昨天 1 条、前天 1 条 → 连续 3 天
+        await s.upsert_submissions("u1", "codeforces", [
+            sub("t1", epoch=mid + 10, verdict="OK"),
+            sub("t2", key="CF:1B", epoch=mid + 20, verdict="AC"),
+            sub("t3", key="CF:1C", epoch=mid + 30, verdict="WRONG_ANSWER"),
+            sub("y1", key="CF:1D", epoch=mid - 10, verdict="OK"),
+            sub("y2", key="CF:1E", epoch=mid - 2 * D + 30, verdict="OK"),
+        ])
+        act = await s.activity("u1")
+        check("今天的提交只数今天（不含昨天那两条）", act["today_sub"] == 3,
+              repr(act["today_sub"]))
+        check("OK 和 AC 都算 AC，WA 不算", act["today_ac"] == 2, repr(act["today_ac"]))
+        check("连续活跃 3 天", act["streak"] == 3, repr(act["streak"]))
+        check("days_since_last = 0（今天来过）", act["days_since_last"] == 0,
+              repr(act["days_since_last"]))
+        check("d7 / d30 是窗口内总数", act["d7"] == 5 and act["d30"] == 5,
+              "%r %r" % (act["d7"], act["d30"]))
+
+        # ★ 边界：中国时区零点前 10 秒算昨天，后 10 秒算今天。
+        # 用 UTC 切法（now % 86400）会在早上 8 点前把"今天"算成昨天。
+        await s.upsert_submissions("u2", "codeforces", [
+            sub("m1", epoch=mid - 10, verdict="OK"),
+        ])
+        act2 = await s.activity("u2")
+        check("★ 昨天 23:59:50 的那条**不算今天**（CN 零点边界）",
+              act2["today_sub"] == 0 and act2["days_since_last"] == 1,
+              repr(act2))
+
+        # ★ 今天没提交 → streak 归零，而不是"从最近那次往回数"
+        await s.upsert_submissions("u3", "codeforces", [
+            sub("g1", key="CF:1F", epoch=mid - 3 * D + 3600, verdict="OK"),
+            sub("g2", key="CF:1G", epoch=mid - 4 * D + 3600, verdict="OK"),
+        ])
+        act3 = await s.activity("u3")
+        check("★ 今天没提交时 streak = 0（不是 2）—— 否则会写出「连续活跃 2 天」"
+              "给一个三天前才交过题的人",
+              act3["streak"] == 0 and act3["days_since_last"] == 3, repr(act3))
+
+        # 今天有、中间空几天 → 只算到今天这一段
+        await s.upsert_submissions("u4", "codeforces", [
+            sub("h1", epoch=mid + 5, verdict="OK"),
+            sub("h2", key="CF:1H", epoch=mid - 5 * D, verdict="OK"),
+        ])
+        act4 = await s.activity("u4")
+        check("今天有、中间断 4 天 → streak 只算 1", act4["streak"] == 1,
+              repr(act4["streak"]))
+        check("昨天没交但今天交了 → days_since_last 仍是 0",
+              act4["days_since_last"] == 0, repr(act4["days_since_last"]))
+
+        check("窗口参数只影响 d7/d30，不影响 today_*",
+              (await s.activity("u1", days=7))["today_sub"] == 3)
+
+    asyncio.run(main())
+
+
 def main() -> int:
     print("=" * 62)
     print("core/store.py 自测")
@@ -555,6 +635,7 @@ def main() -> int:
     test_link_code()
     test_dashboard_link()
     test_task_log()
+    test_activity()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

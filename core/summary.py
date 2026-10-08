@@ -739,6 +739,15 @@ async def build(store, user_id: str, *, platform_names: dict | None = None,
     s.total_solved = total_solved
 
     if total_solved >= 8 and prob_tags:
+        # 哪些平台的题在题库里**带标签** —— 这句话不能写死。
+        # 写死过一次：下面那条 note 原来写的是「题库目前只有 CF」，
+        # v0.5.19 加了洛谷题库（带算法标签）之后它就成了假话，
+        # 而它会被原样转达给用户。
+        _tagged, _untagged = [], []
+        for _plat, _probs in (bank or {}).items():
+            _n = sum(1 for _k, _i in (_probs or {}).items() if _i.get("tags"))
+            (_tagged if _n else _untagged).append(platform_names.get(_plat, _plat))
+
         # 该来源整体的题库中位难度
         src_probs = []
         for _plat, probs in bank.items():
@@ -826,10 +835,13 @@ async def build(store, user_id: str, *, platform_names: dict | None = None,
                     "「疑似难度回避」只是一个**假设**，不是结论 —— "
                     "也可能是不感兴趣、或者没有合适的题源。请结合用户自己的说法判断。")
                 s.notes.append(
-                    "「碰得少」的统计**只覆盖题库里有标签的题**（题库目前只有 CF）。"
-                    "洛谷 / AtCoder 的题没有标签，不在这个统计里 —— "
+                    "「碰得少」的统计**只覆盖题库里有标签的题**"
+                    "（题库里带标签的是 %s%s）。"
                     "**不要把「只做过 0 题」说成「他完全没练过这个方向」**，"
-                    "只能说「在我们看得见标签的这部分数据里没练过」。")
+                    "只能说「在我们看得见标签的这部分数据里没练过」。"
+                    % ("、".join(_tagged) or "（一道都没有）",
+                       "；%s 的题没有标签，不在这个统计里" % "、".join(_untagged)
+                       if _untagged else ""))
 
     # ---- 活跃度 -------------------------------------------------------
     import time

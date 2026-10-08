@@ -670,6 +670,55 @@ class Store:
                 "skipped": counts["skipped"], "rate": rate, "streak": streak,
                 "recent": [dict(r) for r in rows[:7]]}
 
+    async def activity(self, user_id: str, days: int = 30) -> dict:
+        """最近提交活跃度 —— 给每日推送用。
+
+        为什么不直接复用 `summary.build()`：那段要拉全量提交、整个题库、
+        标签表，只为在推送里写一句"今天交了 3 条"不值当。这里只碰
+        `submissions`，走 `idx_sub_user_epoch` 索引。
+
+        `today_sub` 的边界是**中国时区的零点**。用 `now % 86400` 那种
+        UTC 切法会在早上 8 点前把"今天"算成昨天 —— 推送是晚上发的，
+        差一天就是「今天交了没」答错。
+        """
+        user_id = _require_user(user_id)
+        import time as _time
+        from datetime import datetime
+        from . import log as logm
+        now = int(_time.time())
+        midnight = logm.now_cn().replace(hour=0, minute=0, second=0, microsecond=0)
+        t0 = int(midnight.timestamp())
+        rows = await self.db.query(
+            "SELECT epoch, UPPER(verdict) AS v FROM submissions "
+            "WHERE user_id=? AND epoch IS NOT NULL AND epoch >= ?",
+            (user_id, min(t0, now - max(1, int(days)) * 86400)))
+        eps = [(int(r["epoch"]), r["v"] in ("OK", "AC", "ACCEPTED")) for r in rows]
+        today = [ok for e, ok in eps if e >= t0]
+
+        def _day(ep: int):
+            return datetime.fromtimestamp(ep, logm.CN_TZ).date()
+
+        have = sorted({_day(e) for e, _ in eps}, reverse=True)
+        # 只有**今天就有提交**时才谈"连续"。一个叫 `streak` 的字段紧挨着
+        # `days_since_last`，调用方迟早会拿它去写"连续活跃 3 天" —— 而那个
+        # 人上一次交题可能是一周前。今天没交，就是断了。
+        streak = 0
+        if have and have[0] == _day(t0):
+            streak = 1
+            for i in range(1, len(have)):
+                if (have[i - 1] - have[i]).days == 1:
+                    streak += 1
+                else:
+                    break
+        return {
+            "today_sub": len(today), "today_ac": sum(1 for ok in today if ok),
+            "d7": sum(1 for e, _ in eps if now - e <= 7 * 86400),
+            "d30": sum(1 for e, _ in eps if now - e <= 30 * 86400),
+            "streak": streak,
+            "last_epoch": max((e for e, _ in eps), default=0),
+            "days_since_last": (_day(t0) - have[0]).days if have else None,
+        }
+
     # ==================================================================
     # 方案与反馈
     # ==================================================================

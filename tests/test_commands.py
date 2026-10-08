@@ -202,7 +202,25 @@ def install_stub():
     ev = types.ModuleType("astrbot.api.event")
     ev.AstrMessageEvent = AstrMessageEvent
     ev.filter = _Filter()
-    ev.MessageChain = lambda *a, **kw: None
+
+    class MessageChain:
+        """真的 MessageChain 是"能串起来的消息段"。
+
+        这里只要能记住文本 —— `/xcpc 推送测试` 那条路要断言**发出去的
+        到底是什么**，而 `_push_once` 唯一会碰的就是它。
+        """
+
+        def __init__(self, *a, **kw):
+            self.parts = []
+
+        def message(self, text):
+            self.parts.append(text)
+            return self
+
+        def __str__(self):
+            return "".join(self.parts)
+
+    ev.MessageChain = MessageChain
     star = types.ModuleType("astrbot.api.star")
     star.Star = Star
     star.Context = Context
@@ -998,6 +1016,118 @@ def test_sync_log_report():
     asyncio.run(main_())
 
 
+# ---------------------------------------------------------------------------
+# 9. 每日推送 —— 数据必须来自插件自己的库
+# ---------------------------------------------------------------------------
+
+def test_push_train():
+    """v0.5.23：推送原来只读**空的** file 工作区，方案一条都进不去。
+
+    真机现场（2026-10-08）：`/xcpc 方案` 把方案写进 `plans` 表，而 22:30
+    那条推送只读 `workspace/00-plan/sprint.md` —— 那个文件里还是模板原话
+    「现在这个文件里一条任务都没有」。于是每天发出去的只有：
+
+        🌙 今天的收尾
+
+        ⚠️ 今天还没记复盘 —— 回一句「复盘」+ 内容就行，别拖过 24 小时。
+
+    方案、打卡、提交，一条都没有。而 `format_push` 当时**一条测试都没有**。
+    """
+    print("\n[9] 每日推送带上插件自己的数据")
+
+    async def main_():
+        tmp = tempfile.mkdtemp(prefix="xcpc_push_")
+        p, mod = await make_plugin(tmp)
+
+        # --- _uid_from_umo：只认私聊 ---
+        f = mod._uid_from_umo
+        check("私聊 umo 取得到 uid",
+              f("default:FriendMessage:3085596249") == "3085596249",
+              repr(f("default:FriendMessage:3085596249")))
+        check("群聊 umo 取不到 uid —— 那段是**群号**，不是人",
+              f("default:GroupMessage:123456") == "",
+              repr(f("default:GroupMessage:123456")))
+        check("空 / 畸形 umo 返回空串，不抛异常",
+              f("") == "" and f("x") == "" and f(None) == "",
+              "%r %r %r" % (f(""), f("x"), f(None)))
+
+        # --- format_push_train ---
+        Plan, Task = mod.llmm.Plan, mod.llmm.Task
+        fpt = mod.format_push_train
+        plan = Plan(date="2026-10-08", assessment="诊断",
+                    tasks=[Task(kind="practice", title="trees 入门",
+                                problem="CF:1188A1", minutes=50, why="这是理由"),
+                           Task(kind="learn", title="读套路笔记", minutes=25)])
+        out = fpt(plan, {"status": "done", "note": "还行"},
+                  {"today_sub": 3, "today_ac": 2, "streak": 4, "days_since_last": 0})
+        check("方案列出来了", "今天的方案（2 项）" in out, out[:90])
+        check("任务行有 kind 标签 + 题号 + 时长",
+              "· [做题] trees 入门 → CF:1188A1 （50 分钟）" in out, out)
+        check("打卡状态写出来了", "✅ 今天已打卡：做完了（还行）" in out, out)
+        check("今天的提交数写出来了", "🔥 今天交了 3 条，AC 2 条。" in out, out)
+        check("提交>0 才提「连续活跃」", "连续活跃 4 天。" in out, out)
+        check("why 不进展推送（那是方案正文的事，推送要一眼扫完）",
+              "这是理由" not in out, out)
+
+        out2 = fpt(plan, None,
+                   {"today_sub": 0, "today_ac": 0, "streak": 0, "days_since_last": 2})
+        check("没打卡就说「还没打卡」——**不推断他偷懒**（v0.5.15 的教训）",
+              "今天还没打卡" in out2 and "偷懒" not in out2, out2)
+        check("今天没提交时给「最近一次在几天前」",
+              "最近一次在 2 天前" in out2, out2)
+        check("今天没提交时不显示「连续活跃」", "连续活跃" not in out2, out2)
+
+        out3 = fpt(None, {"status": "partial", "note": ""},
+                   {"today_sub": 0, "today_ac": 0, "streak": 0, "days_since_last": 9})
+        check("只有打卡、没有方案时也不炸，且不说「今天还没打卡」",
+              "做了一半" in out3 and "还没打卡" not in out3, out3)
+        check("三样都取不到 → 空串（让调用方退回老格式，而不是发「暂无数据」）",
+              fpt(None, None, None) == "" and fpt(None, None, {}) == "",
+              repr(fpt(None, None, None)))
+
+        # --- format_push(train=...) ---
+        st = {"next_contest": None, "streak": {}}
+        base = mod.format_push(st, {"items": []}, False)
+        check("不传 train 时和以前**一模一样**（真去手写 sprint.md 的人还要用）",
+              base == mod.format_push(st, {"items": []}, False, train=""), base)
+        with_t = mod.format_push(st, {"items": []}, False, train="XX方案XX")
+        check("train 插在标题之后、复盘提醒之前",
+              with_t.index("🌙 今天的收尾") < with_t.index("XX方案XX")
+              < with_t.index("复盘"), with_t)
+
+        # --- _push_once：每个目标单独组装 ---
+        uid = "qq1001"
+        await p.store.save_plan(uid, mod.today_cn(), {
+            "assessment": "诊断", "watch": "注意", "model_id": "t",
+            "tasks": [{"kind": "practice", "title": "树入门",
+                       "problem": "CF:1188A1", "minutes": 50, "why": "理由"}]})
+        sent = []
+
+        async def _send(umo, chain):
+            sent.append((umo, str(chain)))
+
+        p.context.send_message = _send
+        p._subs_fallback = ["default:FriendMessage:%s" % uid, "test:GroupMessage:999"]
+        n_ok, n_all = await p._push_once()
+        check("两个订阅目标都发了", (n_ok, n_all) == (2, 2), "%r/%r" % (n_ok, n_all))
+        friend = [t for u, t in sent if u.endswith(uid)]
+        group = [t for u, t in sent if u.endswith(":999")]
+        check("私聊那条带上了今天的方案 + 题号",
+              bool(friend) and "今天的方案（1 项）" in friend[0]
+              and "CF:1188A1" in friend[0],
+              friend[0][:140] if friend else "（没发出去）")
+        check("私聊那条仍然保留了老的收尾段",
+              bool(friend) and "今天的收尾" in friend[0],
+              friend[0][:140] if friend else "")
+        check("群里那条**不夹带**某个人的方案（群里那段是群号，认不出人）",
+              bool(group) and "今天的方案" not in group[0],
+              group[0][:140] if group else "（没发出去）")
+        check("取不到 store 时推送照常发（不能因为数据层挂了就整条不发）",
+              await p._push_train_text("") == "")
+
+    asyncio.run(main_())
+
+
 def main() -> int:
     print("=" * 62)
     print("命令接线测试（astrbot 外壳，不联网）")
@@ -1010,6 +1140,7 @@ def main() -> int:
     test_config_is_read()
     test_long_reply_image()
     test_sync_log_report()
+    test_push_train()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

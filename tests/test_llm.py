@@ -143,6 +143,27 @@ def test_happy():
           plan.assessment in md and plan.watch in md and plan.watch in text)
     check("markdown 版结尾没有多余空行", md == md.rstrip(), repr(md[-30:]))
 
+    # ---- Task.short()：推送用的一行紧凑版（v0.5.23）----
+    #
+    # 每日推送里的任务是"一眼扫完"的，不能把 why 也塞进去 —— 那是方案正文
+    # 的事。line() 必须逐字节不变（老 file 后端和复盘都还在用它）。
+    t0, t1 = plan.tasks[0], plan.tasks[1]
+    s0 = t0.short()
+    check("short() 带人话标签、标题、题号、时长",
+          s0 == "[做题] 做一道 dp → CF:1900D （45 分钟）", repr(s0))
+    check("short() 里没有 why", "补短板" not in s0, repr(s0))
+    check("short() 是**一行**（没有换行）", "\n" not in s0, repr(s0))
+    check("line() = 两个空格 + short() + 换行 + 六空格 + why（逐字节不变）",
+          t0.line() == "  " + s0 + "\n      补短板", repr(t0.line()))
+    check("没有题号的任务不出现空箭头",
+          "→" not in t1.short() and t1.short() == "[学新算法] 看单调队列优化 （30 分钟）",
+          repr(t1.short()))
+    bare = llmm.Task(kind="practice", title="随便做做")
+    check("题号 / 时长缺省时不留多余空格或括号",
+          bare.short() == "[做题] 随便做做", repr(bare.short()))
+    check("没有 why 时 line() 就只有缩进那一行",
+          bare.line() == "  [做题] 随便做做", repr(bare.line()))
+
 
 # ---------------------------------------------------------------------------
 # 2. 编造题号
