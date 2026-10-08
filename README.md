@@ -281,7 +281,7 @@ divide and conquer（0 道）。**回避判定要拿真实数据说话，
 | Codeforces | 不用 | 官方 API | 有排名和 Δrating | 全量两万多题，带官方 rating 和算法 tag |
 | AtCoder | 不用 | 社区 API | 有排名和 Δrating | 全量题库（IRT 难度），但 API 里没有算法 tag |
 | QOJ | 要 | 登录后 | 还没做 | `/problems` 不用登录 |
-| 洛谷 | 要 | 导入 Cookie 后 | 暂不支持 | 难度和标签都有 |
+| 洛谷 | 要 | 导入 Cookie 后 | 有 Δrating（**不用登录**） | 难度和标签都有 |
 
 几点说明：
 

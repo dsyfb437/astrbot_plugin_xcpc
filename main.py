@@ -1989,6 +1989,7 @@ class XcpcPlugin(Star):
                 "· CF 的 rated 比赛会在 /xcpc 同步 时一起抓\n"
                 "· AtCoder 的比赛是从提交记录反推的"
                 "（参加了但一道没提交的看不到，排名和 rating 变化也拿不到）\n"
+                "· 洛谷的比赛来自用户页的 rating 曲线（要打过 rated 才有）\n"
                 "· QOJ 的比赛记录还没做")
             return
         lines = ["比赛记录（最近 %d 场）" % len(rows), ""]
