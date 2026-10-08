@@ -72,6 +72,7 @@ git clone https://github.com/dsyfb437/astrbot_plugin_xcpc.git
 | `max_reply_chars` | 整数 | `900` | 单条回复最大字数，超了按行切成多条发 |
 | `list_preview` | 整数 | `5` | `/xcpc 题单` 每份显示几道 |
 | `status_as_image` | 开关 | 关 | 把 `/xcpc 状态` 渲染成图片。要 AstrBot 配了文转图服务，没配就保持关闭 |
+| `plan_as_image` | 开关 | 关 | 把 `/xcpc 方案` 渲染成图片。**方案是这里最长的一段**（五百字上下），QQ 不渲染 markdown，纯文本在手机上就是一坨，超了 `max_reply_chars` 还会被切成好几条。开了之后一张图看完。同样依赖文转图，失败自动退回文本 |
 
 ### 数据来源
 

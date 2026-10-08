@@ -125,6 +125,15 @@ def install_stub():
     class Star:
         def __init__(self, context=None):
             self.context = context
+            # 文转图（真机上是 astrbot.core.star.base.Star.text_to_image）
+            self.t2i_calls = []
+            self.t2i_fail = False
+
+        async def text_to_image(self, text, return_url=True):
+            if self.t2i_fail:
+                raise RuntimeError("这台机器没配文转图")
+            self.t2i_calls.append(text)
+            return "http://example.invalid/t2i.png"
 
     class Context:
         def __init__(self):
@@ -182,8 +191,10 @@ class FakeEvent:
         self.results.append(r)
         return r
 
-    def image_result(self, *a, **kw):
-        return FakeResult("[image]")
+    def image_result(self, url):
+        r = FakeResult("[image] %s" % url)
+        self.results.append(r)
+        return r
 
     def get_sender_id(self):
         return self._sender
@@ -713,6 +724,95 @@ def test_config_is_read():
     check("terminate 里收了这个任务", "_sync_task" in code)
 
 
+def test_long_reply_image():
+    """方案发图 —— 用户要的就是"长文本别在 QQ 上糊成一坨"。
+
+    这里测的是 `_long_reply` 这一条路本身（发图 / 退回文本 / 不切条），
+    不测 cmd_plan 的取数逻辑（那个在 test_loop 里）。
+    """
+    print("\n[7] 长文本：开关开了发图，失败退回文本")
+
+    async def drive_long(p, text, flag, title="", **conf):
+        for k, v in conf.items():
+            p.config[k] = v
+        ev = FakeEvent(message="")
+        async for _ in p._long_reply(ev, text, flag, title=title):
+            pass
+        return ev
+
+    async def main_():
+        tmp = tempfile.mkdtemp(prefix="xcpc_cmdimg_")
+        p, mod = await make_plugin(tmp)
+        # 造一段真的"长文本"：比 max_reply_chars（默认 900）长得多
+        long_text = "诊断：444 题 AC 里有标签的只有 76 题。\n" * 60
+        check("测试用的文本确实够长", len(long_text) > 900, "%d 字" % len(long_text))
+
+        # ① 开关关着 → 纯文本，而且超长会被切成多条
+        ev = await drive_long(p, long_text, "plan_as_image",
+                              title="今日方案", plan_as_image=False)
+        check("关着开关时不发图", "[image]" not in ev.text, ev.text[:80])
+        check("关着开关时按行切条", len(ev.results) > 1,
+              "只发了 %d 条" % len(ev.results))
+        check("关着开关时不碰文转图", not p.t2i_calls,
+              repr(p.t2i_calls[:1]))
+
+        # ② 开关打开 → 一条图，**不管文字多长都不切**
+        p.t2i_calls = []
+        ev = await drive_long(p, long_text, "plan_as_image",
+                              title="今日方案", plan_as_image=True)
+        check("开着开关时发的是图", "[image]" in ev.text, ev.text[:120])
+        check("开图时只发一条（不切条）", len(ev.results) == 1,
+              "发了 %d 条：%r" % (len(ev.results), ev.text[:120]))
+        check("图里带了标题", p.t2i_calls == ["# 今日方案\n\n" + long_text],
+              repr(p.t2i_calls[:1])[:150])
+        check("图里是完整正文（没被截断）",
+              bool(p.t2i_calls) and long_text in p.t2i_calls[0])
+
+        # ③ 没配文转图 → **必须退回文本**，不能让他什么都收不到
+        p.t2i_fail = True
+        ev = await drive_long(p, "短一点的方案", "plan_as_image",
+                              title="今日方案", plan_as_image=True)
+        check("文转图失败时不发空消息", bool(ev.text), "什么都没发出来")
+        check("文转图失败时退回纯文本", "短一点的方案" in ev.text, ev.text[:120])
+        check("文转图失败时不假装发了图", "[image]" not in ev.text, ev.text[:120])
+        p.t2i_fail = False
+
+        # ④ 正文是空的 → 不发图（一张空白图没有意义）
+        p.t2i_calls = []
+        ev = await drive_long(p, "   \n  ", "plan_as_image",
+                              title="今日方案", plan_as_image=True)
+        check("正文为空时不发图", not p.t2i_calls, repr(p.t2i_calls[:1]))
+
+        # ⑤ 两个开关互不串台
+        p.t2i_calls = []
+        ev = await drive_long(p, "状态正文", "status_as_image",
+                              title="XCPC 状态", status_as_image=True)
+        check("status_as_image 独立生效", "[image]" in ev.text, ev.text[:80])
+        check("status_as_image 读的是自己的开关",
+              p.t2i_calls == ["# XCPC 状态\n\n状态正文"],
+              repr(p.t2i_calls[:1])[:120])
+        p.t2i_calls = []
+        ev = await drive_long(p, "状态正文", "status_as_image",
+                              title="XCPC 状态", status_as_image=False)
+        check("关掉 status_as_image 后回到文本",
+              "[image]" not in ev.text and "状态正文" in ev.text, ev.text[:80])
+
+        # ⑥ 两个命令真的接到了这条路上（钉住接线，别只测了工具函数）
+        src = open(os.path.join(os.path.dirname(__file__), "..", "main.py"),
+                   encoding="utf-8").read()
+        check("cmd_status 走 _long_reply", 'text, "status_as_image"' in src)
+        check("cmd_plan 走 _long_reply 且用 plan_as_image",
+              'result.plan.to_text(),\n                                        "plan_as_image"' in src
+              or '"plan_as_image"' in src)
+        check("旧的内联发图代码没留两份",
+              src.count("await self.text_to_image(") == 1,
+              "有 %d 处" % src.count("await self.text_to_image("))
+
+        await p.terminate()
+
+    asyncio.run(main_())
+
+
 def main() -> int:
     print("=" * 62)
     print("命令接线测试（astrbot 外壳，不联网）")
@@ -723,6 +823,7 @@ def main() -> int:
     test_no_crash()
     test_data_root()
     test_config_is_read()
+    test_long_reply_image()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

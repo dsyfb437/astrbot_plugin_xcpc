@@ -112,6 +112,12 @@
     "default": false,
     "hint": "用 AstrBot 自带的文转图。没配 t2i 服务就保持关闭，否则每次都会退回文本（多花一次失败等待）"
   },
+  "plan_as_image": {
+    "description": "/方案 渲染成图片",
+    "type": "bool",
+    "default": false,
+    "hint": "方案是这里最长的一段（五百字上下），QQ 不渲染 markdown，纯文本在手机上就是一坨。开了之后一张图看完、不会被切条。同样依赖 AstrBot 的文转图；失败会自动退回文本，不会让你什么都收不到"
+  },
   "list_preview": {
     "description": "/题单 每份题单显示几道",
     "type": "int",
