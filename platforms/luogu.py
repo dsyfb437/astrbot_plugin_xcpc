@@ -50,6 +50,20 @@ _CONTEXT_RE = re.compile(
 # 标签表（ID → 名字）。`window.__luoguTagRequest = '/_lfe/tags'`
 _TAG_URL = ORIGIN + "/_lfe/tags"
 
+# 题库列表。**实测（2026-10-08）**：
+#     GET /problem/list?page=N&_contentOnly=1  →  200 / 61 KB（**HTML**，不是 JSON）
+#     数据同样在 `lentille-context` 里：
+#         data.problems.count    = 17686     题库总题数
+#         data.problems.perPage  = 50        每页固定 50
+#         data.problems.result   = [{pid, name, difficulty, tags:[id...]}]
+#
+# ⚠️ **`perPage` 传什么都是 50**（实测 `perPage=1000` / `perPage=200` 返回的
+# 仍是 `perPage: 50` 和 50 条）。所以全量拉一次是 17686/50 ≈ 354 个请求。
+# 这也是它**不进自动同步**的原因（见 `core/sync.py` 的说明）。
+_PROBLEM_LIST_URL = ORIGIN + "/problem/list?page=%d&_contentOnly=1"
+_PROBLEM_PER_PAGE = 50
+_MAX_PROBLEM_PAGES = 400        # 354 够用，留点余量以防题数涨了
+
 # 「Welcome - Luogu Spilopelia」曾经被我当成"第二层挑战页"的特征。
 #
 # ⚠️ **那是误判（2026-10-08 实测）**：这个标题是洛谷 SPA 外壳对
@@ -193,6 +207,65 @@ class Luogu:
             "tags": None,          # 等拿到标签表再填
         }
 
+    @staticmethod
+    def parse_problem_list(html: str):
+        """从**题库列表页**里解出这一页。
+
+        实测（2026-10-08），数据同样在 `lentille-context` 里，但形状和
+        题面页不同 —— 是 `data.problems.{count, perPage, result}`：
+
+            {"data": {"problems": {"count": 17686, "perPage": 50,
+                                   "result": [{"pid": "P1000",
+                                               "name": "超级玛丽游戏",
+                                               "difficulty": 1,
+                                               "tags": [2, 108]}, ...]}}}
+
+        返回 `{"count": int, "problems": [{"pid","name","difficulty","tag_ids"}]}`，
+        每条的形状**和 `parse_problem_page` 保持一致**（上层不用分两种情况）。
+        返回 `None` 表示认不出结构。
+
+        ⚠️ 列表页的每条**没有 `tags` 名字，只有数字 ID**，和题面页一样 ——
+        名字要去 `/_lfe/tags` 换（`fetch_tag_map`）。
+        这里**不编名字**：拿不到 tag_map 就留 None（"给不出"）。
+        """
+        payload = _context_payload(html)
+        if payload is None:
+            return None
+        problems = ((payload.get("data") or {}).get("problems")) or {}
+        if not isinstance(problems, dict):
+            return None
+        rows = problems.get("result")
+        if not isinstance(rows, list):
+            return None
+
+        try:
+            count = int(problems.get("count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+
+        out = []
+        for p in rows:
+            if not isinstance(p, dict):
+                continue
+            pid = str(p.get("pid") or "")
+            if not pid:
+                continue
+            diff = p.get("difficulty")
+            try:
+                diff = int(diff) if diff is not None else None
+            except (TypeError, ValueError):
+                diff = None
+            raw_tags = p.get("tags")
+            tag_ids = ([t for t in raw_tags if isinstance(t, int)]
+                       if isinstance(raw_tags, list) else [])
+            out.append({
+                "pid": pid,
+                "name": str(p.get("name") or ""),
+                "difficulty": diff,
+                "tag_ids": tag_ids,
+            })
+        return {"count": count, "problems": out}
+
     async def fetch_tag_map(self, client) -> dict:
         """拉标签表：`{id: 名字}`。
 
@@ -295,6 +368,93 @@ class Luogu:
             difficulty_source="luogu_level" if parsed["difficulty"] is not None
             else "unknown",
         )], ok=True)
+
+    # ---- 题库（全量）----------------------------------------------------
+    #
+    # 为什么要有这个
+    # --------------
+    # `supports_problems = True` 曾经是**假的**：这个类有 `fetch_problem`
+    # （单题）却没有 `fetch_problems`（全量），所以哪天谁调一次
+    # `ensure_problem_bank("luogu")`，就是 `AttributeError` —— 而接口声明的
+    # 意思恰恰是"这个平台能提供题库"。**声明和实现不一致，比不会更坏**：
+    # 上层会放心地调，错在运行时才炸。
+    #
+    # 为什么值得实现
+    # --------------
+    # 洛谷的题**有标签也有难度**（1-7 档），是四个平台里除了 CF 之外
+    # 唯一两样都给得出来的。用户的洛谷 AC 有 333 道 —— 题库里没有它们的话，
+    # "按标签分析"那条线的分母就只有 CF 的 76 道（见 `core/summary.py` 里
+    # `tagged_solved` 那段注释）。**这是整个诊断里最大的一处失真。**
+    #
+    # 代价：17686 题 / 每页 50 → 354 个请求，按 `min_interval=1.5s`
+    # 要十几分钟。所以它**不进自动同步**，只在 `force=True` 时拉。
+    async def fetch_problems(self, client=None) -> Fetched:
+        """拉全量题库标注（题号 + 标题 + 难度 + 标签）。
+
+        `/_lfe/tags` 是**公开**的，`/problem/list` 也是 —— 不需要登录，
+        也不需要用户的 Cookie。所以这个可以全局拉一次给所有人用。
+        """
+        tag_map = await self.fetch_tag_map(client)
+        # 标签表拿不到不算失败：难度照样有用，标签留 None（"给不出"），**不编**。
+
+        out: list[Problem] = []
+        seen: set[str] = set()
+        total = 0
+        for page in range(1, _MAX_PROBLEM_PAGES + 1):
+            resp = await client.get(_PROBLEM_LIST_URL % page)
+
+            if page == 1:
+                # 第一页就出问题 —— 直接如实报错，别返回一个空题库
+                # （空题库会让上层以为"洛谷没题"，而不是"没拉到"）。
+                if _blocked(resp.text):
+                    return Fetched(ok=False, error_kind="挑战未过",
+                                   detail="被风控页挡住（题库列表页）")
+                if not resp:
+                    return Fetched(ok=False, error_kind="网络不可达",
+                                   detail="HTTP %d" % resp.status)
+
+            parsed = self.parse_problem_list(resp.text)
+            if parsed is None:
+                if page == 1:
+                    return Fetched(ok=False, error_kind="页面结构变化",
+                                   detail="题库列表页里找不到 lentille-context 数据块"
+                                          "（洛谷可能改版了）")
+                # 中途某一页结构变了：**返回已经拿到的**，不要因为最后一页
+                # 把前面十几分钟全丢掉。
+                break
+
+            rows = parsed["problems"]
+            if not rows:
+                break
+
+            if not total:
+                total = parsed["count"]
+
+            for p in rows:
+                key = self.problem_key(p["pid"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                names = None
+                if p["tag_ids"] and tag_map:
+                    got = [tag_map.get(i) for i in p["tag_ids"]]
+                    got = [n for n in got if n]
+                    if got:
+                        names = got
+                out.append(Problem(
+                    platform=self.name,
+                    problem_key=key,
+                    title=p["name"][:200],
+                    tags=names,
+                    difficulty=p["difficulty"],
+                    difficulty_source=("luogu_level"
+                                       if p["difficulty"] is not None else "unknown"),
+                ))
+
+            if total and page * _PROBLEM_PER_PAGE >= total:
+                break
+
+        return Fetched(items=out, ok=True)
 
     # ---- 登录（第二层门，未破）------------------------------------------
     async def login(self, username: str, password: str, client) -> Fetched:

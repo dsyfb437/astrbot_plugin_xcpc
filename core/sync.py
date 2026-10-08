@@ -398,12 +398,29 @@ class Syncer:
         # 题库是全局的，不该按用户重复拉；但它决定了整个诊断能不能工作，
         # 所以不能指望用户记得手动触发。放在提交同步之后，
         # 因为**提交是主要目的，题库是附属** —— 题库拉失败不该让整次同步失败。
-        if "codeforces" in platforms:
+        #
+        # 拉哪些：**给得出标注的**。
+        #   * CF      —— 标签 + rating，最全，1 个请求
+        #   * AtCoder —— 标题 + IRT 难度（**没有标签**，它的 API 里就没有），
+        #                2 个请求。拉进来能把 AtCoder 的难度并进统计
+        #   * QOJ     —— 只有题号和标题，判断不了任何事。**不拉**
+        #                （见 `platforms/qoj.py` 里 `fetch_problems` 的注释）
+        #   * 洛谷     —— 标签 + 1-7 档难度，**两样都给得出来**，但全量是
+        #                354 个请求、十几分钟（`perPage` 固定 50）。
+        #                放进每次同步的必经路径不可接受 —— 它走
+        #                `/xcpc 题库 luogu`（`force=True`）。
+        for p in ("codeforces", "atcoder"):
+            if p not in platforms:
+                continue
             try:
-                okb, msgb, addedb = await self.ensure_problem_bank("codeforces")
-                report.bank = {"ok": okb, "detail": msgb, "added": addedb}
+                okb, msgb, addedb = await self.ensure_problem_bank(p)
+                prev = report.bank or {}
+                report.bank = {"ok": okb, "detail": msgb, "added": addedb,
+                               "platform": p,
+                               "prev": prev or None}
             except Exception as exc:                 # noqa: BLE001
-                report.bank = {"ok": False, "detail": str(exc), "added": 0}
+                report.bank = {"ok": False, "detail": str(exc), "added": 0,
+                               "platform": p}
                 if self.recorder:
                     self.recorder.event("sync.bank_fail", user_id=user_id, ok=False,
                                         error_kind="内部错误", detail=str(exc))

@@ -601,6 +601,125 @@ def test_candidate_avoid_marker():
     asyncio.run(main())
 
 
+async def _alias_fixture():
+    """造一份"题库里**同时有** CF 和洛谷"的数据。
+
+    这是 v0.5.19 之后真机上的样子（洛谷题库拉起来了）。
+    CF 的标签是英文粗标签（`trees`），洛谷的是中文细标签（`树形数据结构`）——
+    **两套词表说的是同一件事**。不归一的话：
+      * `solved_by_tag` 把同一个方向拆成两行，两边题量都偏低
+      * `tagged_solved`（分母）把洛谷题算进去，而分子只认 CF 名字
+    """
+    db, store = await fresh()
+    await store.ensure_user("u1")
+    probs = []
+    for i in range(400):
+        probs.append(Problem("codeforces", "CF:TR%d" % i, "tr%d" % i,
+                             tags=["trees"], difficulty=2400,
+                             difficulty_source="cf_rating"))
+    for i in range(600):
+        probs.append(Problem("codeforces", "CF:MA%d" % i, "ma%d" % i,
+                             tags=["math"], difficulty=1400,
+                             difficulty_source="cf_rating"))
+    for i in range(30):
+        probs.append(Problem("codeforces", "CF:FF%d" % i, "ff%d" % i,
+                             tags=["fft"], difficulty=2600,
+                             difficulty_source="cf_rating"))
+    lg = [Problem("luogu", "LG:P%d" % i, "p%d" % i,
+                  tags=["树形数据结构"], difficulty=6,
+                  difficulty_source="luogu_level") for i in range(300)]
+    probs.extend(lg)
+
+    await store.upsert_problems("codeforces", [p for p in probs
+                                               if p.platform == "codeforces"])
+    await store.upsert_problems("luogu", lg)
+
+    # CF：AC 10 道 math、1 道 trees；洛谷：AC 20 道（标签是「树形数据结构」）
+    await store.upsert_submissions("u1", "codeforces",
+                                   [sub(i, "CF:MA%d" % i, diff=1400)
+                                    for i in range(10)]
+                                   + [sub(900, "CF:TR0", diff=2400)])
+    await store.upsert_submissions("u1", "luogu", [
+        Submission(platform="luogu", submission_id="L%d" % i,
+                   problem_key="LG:P%d" % i, verdict="AC",
+                   epoch=2000 + i, difficulty=6,
+                   difficulty_source="luogu_level") for i in range(20)])
+
+    bank = {"codeforces": {}, "luogu": {}}
+    for p in probs:
+        bank[p.platform][p.problem_key] = {
+            "tags": p.tags, "difficulty": p.difficulty,
+            "difficulty_source": p.difficulty_source, "title": p.title,
+        }
+    return db, store, bank
+
+
+def test_tag_alias():
+    """各平台的标签名要归一到**一套**词表（`TAG_ALIAS` / `_canon_tags`）。
+
+    真机背景：他 444 题 AC 里"有标签的只有 76 题"，那 76 全是 CF。
+    洛谷那 333 道 AC 因为词表不通（CF 说 `trees`，洛谷说 `树形数据结构`），
+    在标签分析里**根本不存在** —— 这是整个诊断里最大的一处失真。
+    """
+    print("\n[14] 标签归一（CF 的 trees = 洛谷的「树形数据结构」）")
+
+    # ---- 纯函数 ----
+    check("★ None 原样透传（「给不出标签」和「标签是空列表」是两回事）",
+          summ._canon_tags(None) is None, repr(summ._canon_tags(None)))
+    check("空列表还是空列表", summ._canon_tags([]) == [], repr(summ._canon_tags([])))
+    check("★ 两个中文标签都映到 dp 时**去重**（不然 solved_by_tag 会灌水）",
+          summ._canon_tags(["动态规划 DP", "线性 DP"]) == ["dp"],
+          repr(summ._canon_tags(["动态规划 DP", "线性 DP"])))
+    check("CF 的标签本身就是规范名，原样通过",
+          summ._canon_tags(["trees", "dp"]) == ["trees", "dp"],
+          repr(summ._canon_tags(["trees", "dp"])))
+    check("★ 一道题同时带两套词表的同一个方向时也去重",
+          summ._canon_tags(["trees", "树形数据结构"]) == ["trees"],
+          repr(summ._canon_tags(["trees", "树形数据结构"])))
+    check("★ 映射表里没有的标签**原样保留**（不硬塞一个不准确的 CF 名）",
+          summ._canon_tags(["Lyndon 分解"]) == ["Lyndon 分解"],
+          repr(summ._canon_tags(["Lyndon 分解"])))
+    check("并查集 → dsu", summ.TAG_ALIAS.get("并查集") == "dsu",
+          repr(summ.TAG_ALIAS.get("并查集")))
+    check("图论 → graphs", summ.TAG_ALIAS.get("图论") == "graphs",
+          repr(summ.TAG_ALIAS.get("图论")))
+    check("最短路 → shortest paths",
+          summ.TAG_ALIAS.get("最短路") == "shortest paths",
+          repr(summ.TAG_ALIAS.get("最短路")))
+
+    async def main():
+        db, store, bank = await _alias_fixture()
+        s = await summ.build(store, "u1", bank=bank)
+        text = s.to_text()
+
+        # 分母 = 10（CF math）+ 1（CF trees）+ 20（洛谷）= 31
+        ff = [a for a in s.avoided if a["tag"] == "fft"]
+        check("fft 被认成回避方向（题库里 30 道、他一道没做）", bool(ff),
+              repr([a["tag"] for a in s.avoided]))
+        if ff:
+            check("★ 分母把洛谷那 20 道算进来了（10+1+20 = 31，不是 11）",
+                  ff[0]["share_base"] == 31, str(ff[0]["share_base"]))
+        check("★ 正文里写的也是 31", "分母是 31 道" in text, "")
+
+        # ★ 关键：洛谷的「树形数据结构」算进了 CF 的 trees
+        check("★ 归一之后 trees **不再**是回避方向（他其实做过 21 道树题）",
+              not [a for a in s.avoided if a["tag"] == "trees"],
+              repr([a["tag"] for a in s.avoided]))
+
+        stats = {t.tag: t for t in (s.weak_tags + s.strong_tags)}
+        tr = stats.get("trees")
+        check("★ 标签统计里有 trees 这一行", tr is not None, repr(sorted(stats)))
+        if tr:
+            check("★ trees 的题数是 1+20 = 21（洛谷那 20 道算进来了）",
+                  tr.solved == 21, str(tr.solved))
+        check("★ 不会另起一行叫「树形数据结构」（那说明根本没归一）",
+              "树形数据结构" not in stats, repr(sorted(stats)))
+
+        await db.close()
+
+    asyncio.run(main())
+
+
 def main() -> int:
     print("=" * 62)
     print("core/summary.py 自测")
@@ -613,6 +732,7 @@ def main() -> int:
     test_luogu_bands_in_text()
     test_tagged_denominator()
     test_candidate_avoid_marker()
+    test_tag_alias()
     test_empty_data()
     test_candidates()
     test_missing_bank()

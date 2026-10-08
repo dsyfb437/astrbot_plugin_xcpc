@@ -315,6 +315,19 @@ E 实现 独立想出 P1 边界写挂了
 # Web 路由前缀。AstrBot 用插件名做命名空间，必须和 metadata.yaml 的 name 一致。
 _ROUTE_PREFIX = "astrbot_plugin_xcpc"
 
+# `/xcpc 题库 <平台>` 的进度提示。**这个数字是给用户做预期的**：
+# 洛谷要拉十几分钟，不说清楚他会以为卡死了。
+#
+# 洛谷为什么这么慢：`/problem/list` 每页**固定 50 条**（`perPage` 传 1000
+# 也还是 50，实测过），17686 道题 ⇒ 354 个请求，而它有 CDN 反爬
+# （`min_interval = 1.5`）⇒ 十几分钟。CF 是一次请求拿全部。
+_BANK_HINT = {
+    "codeforces": "（一次请求，十几秒）",
+    "atcoder": "（一次请求，十几秒）",
+    "luogu": "（**每页固定 50 条，一万七千多道题，要十几分钟**，"
+             "期间别关，拉完会说一声）",
+}
+
 class XcpcPlugin(Star):
     """XCPC 备赛助手插件。
 
@@ -2247,7 +2260,8 @@ class XcpcPlugin(Star):
         """拉取题库标注（难度 + 标签）。
 
         **这是全局的**（同一道题的难度标签对所有人都一样），所以拉一次就够。
-        `/xcpc 同步` 会在它是空的时候自动拉 —— 这个命令是给"想强制刷新"用的。
+        `/xcpc 同步` 会在它是空的时候自动拉 **CF 和 AtCoder** —— 这个命令
+        是给"想强制刷新"和"想拉洛谷"用的。
 
         没有题库的话：按标签的分析、**难度回避判定**、候选题，
         全都用不了。
@@ -2268,7 +2282,7 @@ class XcpcPlugin(Star):
         except Exception:
             before = 0
         yield event.plain_result(
-            "正在拉 %s 的题库标注…（CF 有两万多题，第一次要十几秒）" % pf)
+            "正在拉 %s 的题库标注…%s" % (pf, _BANK_HINT.get(pf, "")))
         try:
             ok, detail, added = await self.syncer.sync_problems(pf)
         except Exception as exc:                        # noqa: BLE001

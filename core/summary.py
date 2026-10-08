@@ -82,6 +82,222 @@ AVOID_CORE_BOOST = 1.8      # 核心方向的 score 再乘这个（只拉开"核
 # 早期版本用 `1 + 0.3×占比`（最多 1.3 倍），被证明压不住 gap —— 已废弃。
 
 
+# ---- 把各平台的标签名归一到一套词表 ------------------------------------
+#
+# 为什么需要
+# ----------
+# 题库里现在有两个来源：CF 的 39 个粗标签（`dp` / `trees` / `graphs`…，
+# 全英文），洛谷的 262 个细标签（`动态规划 DP` / `树形数据结构` /
+# `并查集`…，全中文）。**它们是两套词表，描述的是同一批能力。**
+#
+# 不归一的话会出两个问题，而且都很安静：
+#   1. `solved_by_tag` 会把同一个方向拆成两行 —— CF 的 `dp` 和洛谷的
+#      `动态规划 DP` 各数各的，两边的题量都偏低，谁都不像"练过"。
+#   2. `tagged_solved`（分母）会把洛谷题算进去，而分子只认得 CF 名字，
+#      **同一个数字的分子分母来自两套词表** —— 比不算还糟。
+#
+# 真机背景：他 444 题 AC 里"有标签的只有 76 题"，那 76 全是 CF。
+# 洛谷那 333 道 AC 因为词表不通，在标签分析里根本不存在。
+#
+# 只映射**能对上**的。洛谷那些 CF 没有对应概念的（`莫队` / `Lyndon 分解` /
+# `KTT`…）**原样保留** —— 它们会以洛谷名字出现在弱项列表里，这没问题：
+# 那个列表本来就是"他自己这些年的方向分布"，多几个中文名不损失什么，
+# 而硬塞进一个不准确的 CF 名字才是真的丢信息。
+#
+# ⚠️ 只在**分析时**归一，**题库里存的还是站点原话**（`store.upsert_problems`
+# 存的是 `tags_json`）。理由：题库是"站点说了什么"的记录，归一化是
+# "我们怎么理解"的决策 —— 后者会变，前者不该跟着变。
+TAG_ALIAS = {
+    # --- 基础 ---
+    "模拟": "implementation",
+    "枚举": "brute force",
+    "暴力数据结构": "brute force",
+    "排序": "sortings",
+    "离散化": "sortings",
+    "构造": "constructive algorithms",
+    "Ad-hoc": "constructive algorithms",
+    "分类讨论": "constructive algorithms",
+    "位运算": "bitmasks",
+    "前缀和": "data structures",
+    "差分": "data structures",
+    "高精度": "math",
+    # --- 字符串 ---
+    "字符串": "strings",
+    "字符串（入门）": "strings",
+    "哈希 hashing": "hashing",
+    "哈希表": "hashing",
+    "字典树 Trie": "string suffix structures",
+    "AC 自动机": "string suffix structures",
+    "后缀数组 SA": "string suffix structures",
+    "后缀树": "string suffix structures",
+    "KMP 算法": "string suffix structures",
+    "Z 函数": "string suffix structures",
+    "Manacher 算法": "string suffix structures",
+    "有限状态自动机": "string suffix structures",
+    # --- 动态规划 ---
+    "动态规划 DP": "dp",
+    "递推": "dp",
+    "线性 DP": "dp",
+    "背包 DP": "dp",
+    "树形 DP": "dp",
+    "状压 DP": "dp",
+    "数位 DP": "dp",
+    "区间 DP": "dp",
+    "动态 DP": "dp",
+    "DP 套 DP": "dp",
+    "轮廓线 DP": "dp",
+    "动态规划优化": "dp",
+    "矩阵加速": "dp",
+    "斜率优化": "dp",
+    "决策单调性": "dp",
+    # --- 搜索 ---
+    "搜索": "brute force",
+    "深度优先搜索 DFS": "dfs and similar",
+    "广度优先搜索 BFS": "dfs and similar",
+    "递归": "dfs and similar",
+    "剪枝": "brute force",
+    "记忆化搜索": "dp",
+    "启发式搜索": "brute force",
+    "迭代加深搜索": "brute force",
+    "折半搜索 meet in the middle": "meet-in-the-middle",
+    "随机化": "probabilistic",
+    "模拟退火": "probabilistic",
+    # --- 图论 ---
+    "图论": "graphs",
+    "图论建模": "graphs",
+    "图遍历": "graphs",
+    "拓扑排序": "graphs",
+    "连通块": "graphs",
+    "生成树": "graphs",
+    "强连通分量": "graphs",
+    "双连通分量": "graphs",
+    "欧拉回路": "graphs",
+    "Tarjan": "graphs",
+    "仙人掌": "graphs",
+    "基环树": "graphs",
+    "最短路": "shortest paths",
+    "差分约束": "shortest paths",
+    "Floyd 算法": "shortest paths",
+    "二分图": "graph matchings",
+    "一般图的最大匹配": "graph matchings",
+    "网络流": "flows",
+    "最大流最小割定理": "flows",
+    "最小割": "flows",
+    "费用流": "flows",
+    "上下界网络流": "flows",
+    "2-SAT": "2-sat",
+    # --- 树 ---
+    "树形数据结构": "trees",
+    "树论": "trees",
+    "树的遍历": "trees",
+    "树的直径": "trees",
+    "树的重心": "trees",
+    "最近公共祖先 LCA": "trees",
+    "树链剖分": "trees",
+    "虚树": "trees",
+    "笛卡尔树": "trees",
+    "圆方树": "trees",
+    "Kruskal 重构树": "trees",
+    # --- 数据结构 ---
+    "线性数据结构": "data structures",
+    "栈": "data structures",
+    "队列": "data structures",
+    "优先队列": "data structures",
+    "单调队列": "data structures",
+    "单调栈": "data structures",
+    "链表": "data structures",
+    "堆": "data structures",
+    "线段树": "data structures",
+    "树状数组": "data structures",
+    "平衡树": "data structures",
+    "分块": "data structures",
+    "ST 表": "data structures",
+    "莫队": "data structures",
+    "倍增": "data structures",
+    "离线处理": "data structures",
+    "可持久化": "data structures",
+    "可持久化线段树": "data structures",
+    "线段树合并": "data structures",
+    "树套树": "data structures",
+    "bitset": "data structures",
+    "并查集": "dsu",
+    "可并堆": "dsu",
+    # --- 分治 / 二分 ---
+    "分治": "divide and conquer",
+    "cdq 分治": "divide and conquer",
+    "点分治": "divide and conquer",
+    "线段树分治": "divide and conquer",
+    "整体二分": "divide and conquer",
+    "二分": "binary search",
+    "三分": "ternary search",
+    "双指针 two-pointer": "two pointers",
+    # --- 数学 ---
+    "数学": "math",
+    "数论": "number theory",
+    "素数判断": "number theory",
+    "最大公约数 gcd": "number theory",
+    "扩展欧几里德算法": "number theory",
+    "线性筛法": "number theory",
+    "欧拉函数": "number theory",
+    "逆元": "number theory",
+    "不定方程": "number theory",
+    "进制": "number theory",
+    "中国剩余定理 CRT": "chinese remainder theorem",
+    "Lucas 定理": "combinatorics",
+    "组合数学": "combinatorics",
+    "排列组合": "combinatorics",
+    "容斥原理": "combinatorics",
+    "鸽笼原理": "combinatorics",
+    "二项式定理": "combinatorics",
+    "Catalan 数": "combinatorics",
+    "Stirling 数": "combinatorics",
+    "Fibonacci 数列": "combinatorics",
+    "概率论": "probabilistic",
+    "期望": "probabilistic",
+    "随机游走 Markov Chain": "probabilistic",
+    "矩阵运算": "matrices",
+    "矩阵乘法": "matrices",
+    "线性代数": "matrices",
+    "高斯消元": "matrices",
+    "线性基": "matrices",
+    "快速傅里叶变换 FFT": "fft",
+    "快速数论变换 NTT": "fft",
+    "快速沃尔什变换 FWT": "fft",
+    "博弈论": "games",
+    "SG 函数": "games",
+    "Nim 积": "games",
+    "博弈树": "games",
+    # --- 几何 ---
+    "计算几何": "geometry",
+    "平面几何": "geometry",
+    "凸包": "geometry",
+    "叉积": "geometry",
+    "向量": "geometry",
+    "扫描线": "geometry",
+    "旋转卡壳": "geometry",
+    "半平面交": "geometry",
+    "线段相交": "geometry",
+}
+
+
+def _canon_tags(tags):
+    """把一道题的标签归一到统一词表（见 `TAG_ALIAS`）。
+
+    `None` 表示"这个平台给不出标签"，和"标签是空列表"是两回事，
+    原样透传 —— `tagged_solved` 那个分母靠这个区分。
+    归一之后**去重**：洛谷一道题可能同时有 `动态规划 DP` 和 `线性 DP`，
+    都映到 `dp`，重复计数会把 `solved_by_tag` 灌水。
+    """
+    if tags is None:
+        return None
+    out = []
+    for t in tags:
+        name = TAG_ALIAS.get(t, t)
+        if name not in out:
+            out.append(name)
+    return out
+
+
 def _band(d: int | None, source: str = "cf_rating") -> str:
     """把难度分档。**分档方式按来源走** —— 三套尺子不能共用一套档。
 
@@ -477,7 +693,9 @@ async def build(store, user_id: str, *, platform_names: dict | None = None,
     prob_diff: dict[str, int | None] = {}
     for _plat, probs in bank.items():
         for key, info in (probs or {}).items():
-            prob_tags[key] = info.get("tags")
+            # 归一：CF 的 `dp` 和洛谷的 `动态规划 DP` 是同一个方向（见 TAG_ALIAS）。
+            # 不归一的话分子分母会来自两套词表 —— 见 `_canon_tags` 的说明。
+            prob_tags[key] = _canon_tags(info.get("tags"))
             prob_diff[key] = info.get("difficulty")
 
     tag_rows: dict[str, list] = defaultdict(list)

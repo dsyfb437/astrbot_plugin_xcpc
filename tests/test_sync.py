@@ -381,6 +381,100 @@ def test_platform_proxies():
     asyncio.run(body())
 
 
+class BankAdapter(FakeAdapter):
+    """会记下 `fetch_problems` 有没有被调的假适配器。"""
+
+    supports_problems = True
+
+    def __init__(self, items=None, ok=True, **kw):
+        FakeAdapter.__init__(self, **kw)
+        self.problem_calls = 0
+        self._items = list(items or [])
+        self._ok = ok
+
+    async def fetch_problems(self, client=None):
+        self.problem_calls += 1
+        return Fetched(items=list(self._items), ok=self._ok,
+                       detail="" if self._ok else "boom")
+
+
+def test_bank_platforms():
+    """自动拉题库时**拉哪些平台**。
+
+    真机背景（2026-10-08）：`problems` 表里只有 `('codeforces', 11425)` ——
+    AtCoder / 洛谷 的题库压根没拉过。而 `core/sync.py` 里写死了
+    `if "codeforces" in platforms`，**别的平台没有入口**。
+
+    分两类的理由（这是这个测试真正在钉的东西）：
+      * CF / AtCoder —— 一两个请求，几十秒内回来 → 进自动同步
+      * **洛谷** —— 17686 题 / 每页固定 50 → **354 个请求、十几分钟**
+        （`perPage` 传什么都不变，实测过）。放进每次同步的必经路径
+        会让用户以为"同步卡死了" → 只走 `/xcpc 题库 luogu`
+      * QOJ —— 只有题号和标题，判断不了任何事 → 永远不拉
+    """
+    print("\n[8] 自动拉题库的平台范围")
+
+    async def main():
+        def cf_problem():
+            from platforms.base import Problem
+            return Problem("codeforces", "CF:1A", "Theatre Square",
+                           tags=["math"], difficulty=1000,
+                           difficulty_source="cf_rating")
+
+        amap = {p: BankAdapter(items=[cf_problem()] if p == "codeforces" else [])
+                for p in ("codeforces", "atcoder", "luogu", "qoj")}
+
+        db, store, s, _ = await fresh(
+            adapter_map=amap,
+            handles={"u1": {"codeforces": "h", "atcoder": "h", "luogu": "h"}})
+
+        rep = await s.sync("u1")
+        check("★ CF 的题库被拉了", amap["codeforces"].problem_calls == 1,
+              str(amap["codeforces"].problem_calls))
+        check("★ AtCoder 的题库也拉了（之前只拉 CF，这是补上的缺口）",
+              amap["atcoder"].problem_calls == 1,
+              str(amap["atcoder"].problem_calls))
+        check("★★ 洛谷的题库**不在**自动路径里（354 个请求 / 十几分钟）",
+              amap["luogu"].problem_calls == 0,
+              str(amap["luogu"].problem_calls))
+        check("QOJ 的题库永远不拉（只有题号标题，判断不了任何事）",
+              amap["qoj"].problem_calls == 0,
+              str(amap["qoj"].problem_calls))
+        check("report.bank 记的是最后一次（atcoder）",
+              (rep.bank or {}).get("platform") == "atcoder",
+              repr(rep.bank))
+        check("report.bank 里保留了前一次的结论（cf 的 prev）",
+              ((rep.bank or {}).get("prev") or {}).get("platform") == "codeforces",
+              repr((rep.bank or {}).get("prev")))
+
+        # 题库非空 → 第二次同步跳过，不再重复拉
+        check("题库真的落库了", await store.count_problems("codeforces") == 1,
+              str(await store.count_problems("codeforces")))
+        await s.sync("u1")
+        check("★ 题库已有内容时跳过（不重复拉）",
+              amap["codeforces"].problem_calls == 1,
+              str(amap["codeforces"].problem_calls))
+        check("AtCoder 题库是空的，所以还会再试一次",
+              amap["atcoder"].problem_calls == 2,
+              str(amap["atcoder"].problem_calls))
+
+        # `/xcpc 题库 luogu` 这条路必须能拉到洛谷（force=True）
+        ok, detail, _added = await s.ensure_problem_bank("luogu", force=True)
+        check("★ 显式拉洛谷题库是通的（fetch_problems 真的被调了）",
+              amap["luogu"].problem_calls == 1 and ok,
+              "%d / %s" % (amap["luogu"].problem_calls, detail))
+
+        # 不支持题库的平台要如实拒绝，而不是 AttributeError
+        amap["qoj"].supports_problems = False
+        ok2, detail2, _ = await s.sync_problems("qoj")
+        check("不支持题库的平台返回明确理由（不是抛异常）",
+              not ok2 and "不支持" in detail2, "%s / %s" % (ok2, detail2))
+
+        await db.close()
+
+    asyncio.run(main())
+
+
 def main() -> int:
     print("=" * 62)
     print("core/sync.py 自测")
@@ -392,6 +486,7 @@ def main() -> int:
     test_idempotent_sync()
     test_multi_user_sync()
     test_platform_proxies()
+    test_bank_platforms()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

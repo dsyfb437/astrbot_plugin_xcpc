@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 
 for _s in (sys.stdout, sys.stderr):
@@ -140,6 +141,37 @@ def row(sid, pid, epoch, status=12, diff=1):
     """一条提交记录（字段名照抄真实响应：submitTime / problem.pid）。"""
     return {"id": sid, "status": status, "submitTime": epoch,
             "problem": {"pid": pid, "difficulty": diff}}
+
+
+def list_html(rows, count=17686, per_page=50):
+    """造一个**题库列表页** —— 结构照抄 2026-10-08 抓的真实响应。
+
+    实测：`GET /problem/list?page=N&_contentOnly=1` 返回的是 **HTML**
+    （61 KB，不是 JSON），数据同样在 `lentille-context` 里，但形状和题面页
+    不同 —— 是 `data.problems.{count, perPage, result}`，每条是
+    `{pid, name, difficulty, tags:[数字ID]}`（**没有标签名字**）。
+    """
+    payload = {
+        "instance": "main",
+        "template": "problem.list",
+        "status": 200,
+        "locale": "zh-CN",
+        "data": {"problems": {"perPage": per_page, "count": count,
+                              "result": rows}},
+        "user": None,
+        "time": 1791424475,
+    }
+    return ('<!DOCTYPE html><html><head><title>题库 - 洛谷</title></head><body>'
+            '<script id="lentille-context" type="application/json">'
+            + json.dumps(payload, ensure_ascii=False)
+            + "</script></body></html>")
+
+
+def lrow(pid, name, diff=1, tags=None):
+    """题库列表里的一条（字段名照抄真实响应）。"""
+    return {"pid": pid, "type": "P", "name": name, "difficulty": diff,
+            "fullScore": 100, "tags": list(tags or []),
+            "totalSubmit": 1878697, "totalAccepted": 718269, "flag": 5}
 
 
 class Resp:
@@ -551,6 +583,186 @@ def test_lg_verdict():
           not _is_ac(_lg_verdict(99)), repr(_lg_verdict(99)))
 
 
+def test_fetch_problems():
+    print("\n[8] 全量题库（fetch_problems）")
+
+    # ---- 声明和实现必须一致 ----
+    #
+    # 真 bug（v0.5.19 修）：`Luogu.supports_problems = True` 挂了很久，
+    # 但这个类**根本没有 `fetch_problems`** —— 有单题的 `fetch_problem`，
+    # 没有全量的那个。谁要是调 `ensure_problem_bank("luogu")` 就是
+    # `AttributeError`，被 `core/sync.py` 的 `except` 兜住，表现成
+    # "题库拉取失败：[内部错误]"，看不出是接口没实现。
+    # **声明的意思是"这个平台能提供题库"，假的比没有更坏。**
+    check("★ supports_problems=True 就必须真的有 fetch_problems（这就是修掉的 bug）",
+          bool(getattr(Luogu, "supports_problems", False))
+          and callable(getattr(Luogu, "fetch_problems", None)))
+
+    # ---- 解析器（离线）----
+    got = Luogu.parse_problem_list(
+        list_html([lrow("P1000", "超级玛丽游戏", 1, [1, 7])]))
+    check("能从题库列表页解析出来", got is not None, repr(got))
+    if got:
+        check("总题数读到了", got["count"] == 17686, repr(got["count"]))
+        check("解出 1 条", len(got["problems"]) == 1, repr(len(got["problems"])))
+        p = got["problems"][0]
+        check("题号对", p["pid"] == "P1000", p["pid"])
+        check("名字对", p["name"] == "超级玛丽游戏", p["name"])
+        check("难度对", p["difficulty"] == 1, repr(p["difficulty"]))
+        check("标签是数字 ID（列表页只给 ID，没有名字）",
+              p["tag_ids"] == [1, 7], repr(p["tag_ids"]))
+        check("形状和 parse_problem_page 一致（上层不用分两种情况处理）",
+              set(p.keys()) == {"pid", "name", "difficulty", "tag_ids"},
+              repr(sorted(p.keys())))
+
+    check("没有 lentille-context 时返回 None",
+          Luogu.parse_problem_list("<html>没有容器</html>") is None)
+    check("空输入返回 None", Luogu.parse_problem_list("") is None)
+    check("没有 problems 键时返回 None",
+          Luogu.parse_problem_list(
+              '<script id="lentille-context" type="application/json">'
+              '{"data":{"problem":{}}}</script>') is None)
+    check("result 不是列表时返回 None",
+          Luogu.parse_problem_list(
+              '<script id="lentille-context" type="application/json">'
+              '{"data":{"problems":{"count":1,"result":"x"}}}</script>') is None)
+    check("缺 pid 的那条被丢掉（不塞一个空题号进题库）",
+          Luogu.parse_problem_list(
+              '<script id="lentille-context" type="application/json">'
+              '{"data":{"problems":{"count":2,"result":'
+              '[{"name":"没有题号"},{"pid":"P1","name":"有"}]}}}</script>'
+          )["problems"] == [{"pid": "P1", "name": "有", "difficulty": None,
+                             "tag_ids": []}])
+
+    # ---- 全量拉取：分页 + 收工条件 ----
+    class PageClient:
+        """按 URL 里的 `page=` 分页返回题库列表。**不覆盖的 URL 直接失败。**"""
+
+        def __init__(self, total, per=50):
+            self.total = total
+            self.per = per
+            self.pages = []
+            self.cookies = {}
+
+        def set_cookies(self, c):
+            self.cookies = dict(c or {})
+
+        async def get(self, url, **kw):
+            if "_lfe/tags" in url:
+                return Resp(200, json.dumps(TAGS_JSON, ensure_ascii=False))
+            m = re.search(r"page=(\d+)", url)
+            if not m:
+                raise AssertionError("夹具没覆盖：%s（**不允许走真网络**）" % url)
+            n = int(m.group(1))
+            self.pages.append(n)
+            start = (n - 1) * self.per
+            # 最后一页只给剩下的那些 —— 真实接口不会多吐行出来
+            n_rows = max(0, min(self.per, self.total - start))
+            rows = [lrow("P%05d" % (start + i), "题%d" % (start + i),
+                         (i % 7) + 1, [1, 7]) for i in range(n_rows)]
+            return Resp(200, list_html(rows, count=self.total, per_page=self.per))
+
+    async def main():
+        c = PageClient(total=120)           # 120 题 / 每页 50 → 恰好 3 页
+        got = await Luogu().fetch_problems(c)
+        check("拉成功了", got.ok, got.detail)
+        check("题数对", len(got.items) == 120, repr(len(got.items)))
+        check("★ 只请求需要的那几页（120 题 / 每页 50 → 3 页，不多拉）",
+              c.pages == [1, 2, 3], repr(c.pages))
+
+        if got.ok and got.items:
+            first = got.items[0]
+            check("key 带 LG: 前缀", first.problem_key == "LG:P00000",
+                  first.problem_key)
+            check("难度来源标 luogu_level",
+                  first.difficulty_source == "luogu_level",
+                  first.difficulty_source)
+            check("★ 标签 ID 换成了名字", first.tags == ["模拟", "递归"],
+                  repr(first.tags))
+            check("平台标 luogu", first.platform == "luogu", first.platform)
+            # 第 51 条应该来自第 2 页（分页没错位）
+            check("第 51 条来自第 2 页（分页没错位）",
+                  got.items[50].problem_key == "LG:P00050",
+                  got.items[50].problem_key)
+            check("难度按 i%7+1 走，第 7 条是 7 档",
+                  got.items[6].difficulty == 7, repr(got.items[6].difficulty))
+
+        # 拿不到标签表时**仍然返回难度**，标签留 None（"给不出"，不编）
+        class NoTagClient(PageClient):
+            async def get(self, url, **kw):
+                if "_lfe/tags" in url:
+                    return Resp(500, "boom")
+                return await PageClient.get(self, url, **kw)
+
+        got2 = await Luogu().fetch_problems(NoTagClient(total=50))
+        check("拿不到标签表时仍能拉到题", got2.ok and len(got2.items) == 50,
+              repr(len(got2.items) if got2.ok else got2.detail))
+        check("这时 tags 是 None（不是空列表，也不是编的名字）",
+              got2.ok and got2.items[0].tags is None,
+              repr(got2.ok and got2.items[0].tags))
+
+        # 第一页就被风控 → 如实报错，**不要返回空题库**
+        # （空题库会让上层以为"洛谷没题"，而不是"没拉到"）
+        #
+        # ⚠️ 判据是「没有 lentille-context」而不是「标题是 Welcome」——
+        # 见 `platforms/luogu.py` 里 `_blocked()` 那段注释：Welcome 是
+        # 正常页面的默认标题，光看标题会把整页好数据丢掉。
+        class BlockedClient(PageClient):
+            async def get(self, url, **kw):
+                if "_lfe/tags" in url:
+                    return Resp(200, json.dumps(TAGS_JSON, ensure_ascii=False))
+                return Resp(200, WELCOME_HTML)       # 没容器 = 风控页
+
+        got3 = await Luogu().fetch_problems(BlockedClient(total=120))
+        check("第一页没容器时报「挑战未过」（不返回空题库）",
+              not got3.ok and got3.error_kind == "挑战未过",
+              "%s / %s" % (got3.ok, got3.error_kind))
+        check("★ 失败时 items 是空的（不是「0 题」的意思）",
+              not got3.items, repr(len(got3.items)))
+
+        # 有容器但形状变了（洛谷改版）→ 报「页面结构变化」，
+        # 而不是猜一个难度出来
+        class ShapeClient(PageClient):
+            async def get(self, url, **kw):
+                if "_lfe/tags" in url:
+                    return Resp(200, json.dumps(TAGS_JSON, ensure_ascii=False))
+                return Resp(200,
+                            '<script id="lentille-context" type="application/json">'
+                            '{"data":{"problem":{}}}</script>')
+
+        got3b = await Luogu().fetch_problems(ShapeClient(total=120))
+        check("第一页结构变了明确报「页面结构变化」",
+              not got3b.ok and got3b.error_kind == "页面结构变化",
+              "%s / %s" % (got3b.ok, got3b.error_kind))
+
+        class DownClient(PageClient):
+            async def get(self, url, **kw):
+                if "_lfe/tags" in url:
+                    return Resp(200, json.dumps(TAGS_JSON, ensure_ascii=False))
+                return Resp(503, "unavailable")
+
+        got4 = await Luogu().fetch_problems(DownClient(total=120))
+        check("第一页 503 报网络不可达", not got4.ok
+              and got4.error_kind == "网络不可达",
+              "%s / %s" % (got4.ok, got4.error_kind))
+
+        # ★ 中途某一页坏掉：**返回已经拿到的**，别把前面十几分钟全丢掉
+        class MidFailClient(PageClient):
+            async def get(self, url, **kw):
+                if "_lfe/tags" in url:
+                    return Resp(200, json.dumps(TAGS_JSON, ensure_ascii=False))
+                m = re.search(r"page=(\d+)", url)
+                if m and int(m.group(1)) >= 3:
+                    return Resp(200, WELCOME_HTML)
+                return await PageClient.get(self, url, **kw)
+
+        got5 = await Luogu().fetch_problems(MidFailClient(total=1000))
+        check("★ 中途一页坏掉时保留已拉到的（不是全丢）",
+              got5.ok and len(got5.items) == 100, repr(len(got5.items)))
+
+    asyncio.run(main())
+
+
 def main() -> int:
     print("=" * 62)
     print("洛谷适配器离线自测")
@@ -562,6 +774,7 @@ def main() -> int:
     test_login_honest()
     test_fetch_submissions()
     test_lg_verdict()
+    test_fetch_problems()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)
