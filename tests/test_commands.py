@@ -60,10 +60,56 @@ def check(label, ok, detail=""):
 # astrbot 外壳
 # ---------------------------------------------------------------------------
 
+class FakeHtmlRenderer:
+    """假的 `astrbot.core.html_renderer`。
+
+    **故意把 `use_network` 记下来** —— 那正是这里要钉死的东西：真机上
+    `use_network=True` 会把正文 POST 到公共渲染服务 `t2i.soulter.top`，
+    又慢（4.5s vs 0.1s）又可能把消息弄丢（拿回来的是外链）。
+    """
+
+    def __init__(self):
+        self.calls = []            # 渲染过的正文
+        self.network_flags = []    # 每次调用传进来的 use_network
+        self.return_urls = []
+        self.fail = False
+        self.out = "/tmp/fake-t2i.png"
+
+    async def render_t2i(self, text, use_network=True, return_url=False,
+                         template_name=None):
+        if self.fail:
+            raise RuntimeError("这台机器没配文转图")
+        self.calls.append(text)
+        self.network_flags.append(use_network)
+        self.return_urls.append(return_url)
+        return self.out
+
+
+RENDERER = FakeHtmlRenderer()
+
+
+def _attach_renderer():
+    """把假的 html_renderer 挂到 `astrbot.core` 上。**每次都要挂。**
+
+    `test_data_root` 会把 `astrbot.core` 整个换成一个新模块，换掉之后
+    `from astrbot.core import html_renderer` 就 ImportError —— 而那会让
+    `_render_text_image` 静默走**网络**兜底那条路，测试看着还是绿的。
+    """
+    core = sys.modules.get("astrbot.core")
+    if core is None:
+        core = types.ModuleType("astrbot.core")
+        sys.modules["astrbot.core"] = core
+    parent = sys.modules.get("astrbot")
+    if parent is not None:
+        parent.core = core
+    core.html_renderer = RENDERER
+
+
 def install_stub():
     """塞一个最小的 astrbot 外壳，让 `import main` 能过。"""
     import logging
     if "astrbot" in sys.modules:
+        _attach_renderer()
         return
 
     quiet = logging.getLogger("xcpc-cmdtest")
@@ -125,14 +171,18 @@ def install_stub():
     class Star:
         def __init__(self, context=None):
             self.context = context
-            # 文转图（真机上是 astrbot.core.star.base.Star.text_to_image）
+            # 文转图（真机上是 astrbot.core.star.base.Star.text_to_image）。
+            # **正常路径已经不在这里了** —— 见 `_render_text_image`。这个假
+            # 实现只在拿不到 html_renderer 时的那条兜底路上被用到。
             self.t2i_calls = []
             self.t2i_fail = False
+            self.t2i_return_urls = []
 
         async def text_to_image(self, text, return_url=True):
             if self.t2i_fail:
                 raise RuntimeError("这台机器没配文转图")
             self.t2i_calls.append(text)
+            self.t2i_return_urls.append(return_url)
             return "http://example.invalid/t2i.png"
 
     class Context:
@@ -166,6 +216,7 @@ def install_stub():
     sys.modules.update({"astrbot": astrbot, "astrbot.api": api,
                         "astrbot.api.event": ev, "astrbot.api.star": star,
                         "astrbot.api.web": web})
+    _attach_renderer()
 
 
 class FakeResult:
@@ -578,6 +629,7 @@ def test_data_root():
         utils.astrbot_path = pathmod
         sys.modules.update({"astrbot.core": core, "astrbot.core.utils": utils,
                             "astrbot.core.utils.astrbot_path": pathmod})
+        _attach_renderer()      # 上面把 astrbot.core 整个换掉了，得重新挂
         importlib.reload(plugin_main)
         p2 = plugin_main.XcpcPlugin(Context(), {"daily_push": False})
         check("没有 StarTools 时退回 get_astrbot_plugin_data_path()",
@@ -753,31 +805,31 @@ def test_long_reply_image():
         check("关着开关时不发图", "[image]" not in ev.text, ev.text[:80])
         check("关着开关时按行切条", len(ev.results) > 1,
               "只发了 %d 条" % len(ev.results))
-        check("关着开关时不碰文转图", not p.t2i_calls,
-              repr(p.t2i_calls[:1]))
+        check("关着开关时不碰文转图", not RENDERER.calls,
+              repr(RENDERER.calls[:1]))
 
         # ② 开关打开 → 一条图，**不管文字多长都不切**
-        p.t2i_calls = []
+        RENDERER.calls = []
         ev = await drive_long(p, long_text, "plan_as_image",
                               title="今日方案", plan_as_image=True)
         check("开着开关时发的是图", "[image]" in ev.text, ev.text[:120])
         check("开图时只发一条（不切条）", len(ev.results) == 1,
               "发了 %d 条：%r" % (len(ev.results), ev.text[:120]))
-        check("图里带了标题", p.t2i_calls == ["# 今日方案\n\n" + long_text],
-              repr(p.t2i_calls[:1])[:150])
+        check("图里带了标题", RENDERER.calls == ["# 今日方案\n\n" + long_text],
+              repr(RENDERER.calls[:1])[:150])
         check("图里是完整正文（没被截断）",
-              bool(p.t2i_calls) and long_text in p.t2i_calls[0])
+              bool(RENDERER.calls) and long_text in RENDERER.calls[0])
 
         # ③ 有 markdown 版时，图用它、文本用原来那份（两条路不能互相污染）
-        p.t2i_calls = []
+        RENDERER.calls = []
         ev = await drive_long(p, "纯文本正文\n      缩进续行", "plan_as_image",
                               title="今日方案", md="# 不用管这个标题\n\n- **【做题】** 正文",
                               plan_as_image=True)
-        check("有 md 时图里用 md", p.t2i_calls ==
+        check("有 md 时图里用 md", RENDERER.calls ==
               ["# 今日方案\n\n# 不用管这个标题\n\n- **【做题】** 正文"],
-              repr(p.t2i_calls[:1])[:200])
-        check("有 md 时图里不出现纯文本版", "缩进续行" not in (p.t2i_calls[0] if p.t2i_calls else ""))
-        p.t2i_calls = []
+              repr(RENDERER.calls[:1])[:200])
+        check("有 md 时图里不出现纯文本版", "缩进续行" not in (RENDERER.calls[0] if RENDERER.calls else ""))
+        RENDERER.calls = []
         ev = await drive_long(p, "纯文本正文\n      缩进续行", "plan_as_image",
                               title="今日方案", md="# 不用管这个标题",
                               plan_as_image=False)
@@ -786,29 +838,29 @@ def test_long_reply_image():
               ev.text[:120])
 
         # ④ 没配文转图 → **必须退回文本**，不能让他什么都收不到
-        p.t2i_fail = True
+        RENDERER.fail = True
         ev = await drive_long(p, "短一点的方案", "plan_as_image",
                               title="今日方案", plan_as_image=True)
         check("文转图失败时不发空消息", bool(ev.text), "什么都没发出来")
         check("文转图失败时退回纯文本", "短一点的方案" in ev.text, ev.text[:120])
         check("文转图失败时不假装发了图", "[image]" not in ev.text, ev.text[:120])
-        p.t2i_fail = False
+        RENDERER.fail = False
 
         # ⑤ 正文是空的 → 不发图（一张空白图没有意义）
-        p.t2i_calls = []
+        RENDERER.calls = []
         ev = await drive_long(p, "   \n  ", "plan_as_image",
                               title="今日方案", plan_as_image=True)
-        check("正文为空时不发图", not p.t2i_calls, repr(p.t2i_calls[:1]))
+        check("正文为空时不发图", not RENDERER.calls, repr(RENDERER.calls[:1]))
 
         # ⑥ 两个开关互不串台
-        p.t2i_calls = []
+        RENDERER.calls = []
         ev = await drive_long(p, "状态正文", "status_as_image",
                               title="XCPC 状态", status_as_image=True)
         check("status_as_image 独立生效", "[image]" in ev.text, ev.text[:80])
         check("status_as_image 读的是自己的开关",
-              p.t2i_calls == ["# XCPC 状态\n\n状态正文"],
-              repr(p.t2i_calls[:1])[:120])
-        p.t2i_calls = []
+              RENDERER.calls == ["# XCPC 状态\n\n状态正文"],
+              repr(RENDERER.calls[:1])[:120])
+        RENDERER.calls = []
         ev = await drive_long(p, "状态正文", "status_as_image",
                               title="XCPC 状态", status_as_image=False)
         check("关掉 status_as_image 后回到文本",
@@ -827,6 +879,120 @@ def test_long_reply_image():
               src.count("await self.text_to_image(") == 1,
               "有 %d 处" % src.count("await self.text_to_image("))
 
+        # ⑧ **只用本机渲染，绝不走网络。**
+        #    真机上 use_network=True 会把正文 POST 到公共渲染服务
+        #    t2i.soulter.top：同一段正文 4.5s（网络）vs 0.1s（本机），
+        #    而且 return_url=True 拿回来的是外链 —— 交给 event.image_result
+        #    之后要靠适配器再去下载，那一步失败我们这边不报错，
+        #    用户就是什么都收不到（"渲染失败"和"渲染很慢"同源）。
+        RENDERER.calls, RENDERER.network_flags = [], []
+        ev = await drive_long(p, "状态正文", "status_as_image",
+                              title="XCPC 状态", status_as_image=True)
+        check("发图时真的调了渲染器", RENDERER.calls == ["# XCPC 状态\n\n状态正文"],
+              repr(RENDERER.calls[:1])[:120])
+        check("渲染走的是本机（use_network=False）",
+              RENDERER.network_flags == [False], repr(RENDERER.network_flags))
+        check("走的不是 Star 的官方文转图 API（那条会 POST 到 t2i.soulter.top）",
+              not p.t2i_calls, repr(p.t2i_calls[:1])[:120])
+        check("渲染器返回什么就发什么（本机返回的是路径，不是外链）",
+              "/tmp/fake-t2i.png" in ev.text, ev.text[:120])
+        check("源码里显式关了网络渲染（调用点只有一处）",
+              src.count("use_network=False)") == 1,
+              "有 %d 处" % src.count("use_network=False)"))
+        check("没有任何地方用默认的 use_network=True 渲染",
+              src.count("html_renderer.render_t2i(") == 1
+              and "html_renderer.render_t2i(body, use_network=False)" in src,
+              "调用点 %d 个" % src.count("html_renderer.render_t2i("))
+
+        # ⑨ AstrBot 换了内部结构、拿不到 html_renderer 时：
+        #    **退回官方 API 也必须是 return_url=False** —— 要路径不要外链，
+        #    外链那条路的失败我们看不见。
+        astrbot_core = sys.modules["astrbot.core"]
+        saved = getattr(astrbot_core, "html_renderer", None)
+        try:
+            del astrbot_core.html_renderer
+            p.t2i_calls, p.t2i_return_urls = [], []
+            ev = await drive_long(p, "兜底正文", "status_as_image",
+                                  title="XCPC 状态", status_as_image=True)
+            check("拿不到 html_renderer 时退回官方 API", p.t2i_calls == ["# XCPC 状态\n\n兜底正文"],
+                  repr(p.t2i_calls[:1])[:120])
+            check("兜底时也要路径不要外链（return_url=False）",
+                  p.t2i_return_urls == [False], repr(p.t2i_return_urls))
+        finally:
+            if saved is not None:
+                astrbot_core.html_renderer = saved
+
+        await p.terminate()
+
+    asyncio.run(main_())
+
+
+def test_sync_log_report():
+    """自动同步的摘要行必须带上**真正的**失败原因。
+
+    用户贴的日志里，上一行是
+      sync.fail      … pf=qoj … FAIL [凭据失效] 会话已失效（被重定向到登录页），请重新登录
+    紧接着的摘要行却是
+      autosync.done  … FAIL [内部错误] {"platforms": 4, "failed": "qoj"}
+    ——「内部错误」既不是真原因，也没告诉他要重新登录。
+    """
+    print("\n[8] 自动同步摘要行：失败原因要带上来")
+
+    async def main_():
+        tmp = tempfile.mkdtemp(prefix="xcpc_cmdlog_")
+        p, mod = await make_plugin(tmp)
+        from core import sync as syncm
+        from core import log as logm
+
+        rec = logm.Recorder(os.path.join(tmp, "logs", "test.log"),
+                            to_astrbot=False)
+        rec.open()
+        p.log = rec
+
+        def res(platform, ok, kind="", detail=""):
+            return syncm.PlatformResult(platform=platform, ok=ok,
+                                        error_kind=kind, detail=detail)
+
+        def report(*results):
+            return syncm.SyncReport(results=list(results))
+
+        # ① 全成功 → ok=True，没有 [错误类型]
+        p._log_sync_report("u1", report(res("codeforces", True),
+                                        res("atcoder", True)))
+        line = rec.tail(1)[0]
+        check("全成功时记的是 ok", " autosync.done " in line + " " and " ok " in line,
+              line)
+        check("全成功时不带 [内部错误]", "[内部错误]" not in line, line)
+
+        # ② 一个平台凭据失效 → 摘要行必须说「凭据失效」
+        p._log_sync_report("u1", report(
+            res("codeforces", True), res("atcoder", True), res("luogu", True),
+            res("qoj", False, "凭据失效",
+                "会话已失效（被重定向到登录页），请重新登录")))
+        line = rec.tail(1)[0]
+        check("有平台失败时记的是 FAIL", " FAIL " in line, line)
+        check("摘要行带的是真原因（凭据失效）", "[凭据失效]" in line, line)
+        check("摘要行**不再**说 [内部错误]", "[内部错误]" not in line, line)
+        check("摘要行说清了该怎么办（重新登录）", "重新登录" in line, line)
+        check("摘要行点出是哪个平台", "qoj" in line, line)
+        check("摘要行仍然带平台总数与失败名单",
+              '"platforms": 4' in line and '"failed": "qoj"' in line, line)
+
+        # ③ 失败原因是空的 → 才轮到「内部错误」兜底（而不是反过来）
+        p._log_sync_report("u1", report(res("qoj", False, "", "炸了")))
+        line = rec.tail(1)[0]
+        check("真没有 error_kind 时才落到 [内部错误]", "[内部错误]" in line, line)
+        check("兜底时也带着原始说明", "炸了" in line, line)
+
+        # ④ 多个平台同时挂 → 每个的原因都要在
+        p._log_sync_report("u1", report(
+            res("qoj", False, "凭据失效", "会话已失效，请重新登录"),
+            res("luogu", False, "网络故障", "连接超时")))
+        line = rec.tail(1)[0]
+        check("多个失败时取第一个的原因定性", "[凭据失效]" in line, line)
+        check("多个失败时每个原因都在", "重新登录" in line and "连接超时" in line, line)
+        check("failed 列表有两个平台", '"failed": "qoj,luogu"' in line, line)
+
         await p.terminate()
 
     asyncio.run(main_())
@@ -843,6 +1009,7 @@ def main() -> int:
     test_data_root()
     test_config_is_read()
     test_long_reply_image()
+    test_sync_log_report()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

@@ -71,8 +71,8 @@ git clone https://github.com/dsyfb437/astrbot_plugin_xcpc.git
 | `log_level` | `info` / `debug` | `info` | `debug` 会记录每次 HTTP 请求（URL、状态码、耗时），凭据在那之前已经打码 |
 | `max_reply_chars` | 整数 | `900` | 单条回复最大字数，超了按行切成多条发 |
 | `list_preview` | 整数 | `5` | `/xcpc 题单` 每份显示几道 |
-| `status_as_image` | 开关 | 关 | 把 `/xcpc 状态` 渲染成图片。要 AstrBot 配了文转图服务，没配就保持关闭 |
-| `plan_as_image` | 开关 | 关 | 把 `/xcpc 方案` 渲染成图片。**方案是这里最长的一段**（五百字上下），QQ 不渲染 markdown，纯文本在手机上就是一坨，超了 `max_reply_chars` 还会被切成好几条。开了之后一张图看完。同样依赖文转图，失败自动退回文本 |
+| `status_as_image` | 开关 | 关 | 把 `/xcpc 状态` 渲染成图片。渲染走 AstrBot **本机**的纯 PIL 渲染器（不需要浏览器，也不需要联网），失败自动退回文本 |
+| `plan_as_image` | 开关 | 关 | 把 `/xcpc 方案` 渲染成图片。**方案是这里最长的一段**（五百字上下），QQ 不渲染 markdown，纯文本在手机上就是一坨，超了 `max_reply_chars` 还会被切成好几条。开了之后一张图看完。渲染同样走**本机**（不联网、不外发正文），失败自动退回文本 |
 
 ### 数据来源
 

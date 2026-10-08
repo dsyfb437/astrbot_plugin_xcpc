@@ -402,12 +402,7 @@ class XcpcPlugin(Star):
                 for uid in users:
                     try:
                         report = await self.syncer.sync(uid)
-                        if self.log:
-                            fails = [r.platform for r in report.failures()]
-                            self.log.event("autosync.done", user_id=uid,
-                                           ok=not fails,
-                                           platforms=len(report.results),
-                                           failed=",".join(fails))
+                        self._log_sync_report(uid, report)
                     except Exception as exc:             # noqa: BLE001
                         if self.log:
                             self.log.event("autosync.fail", user_id=uid, ok=False,
@@ -421,6 +416,27 @@ class XcpcPlugin(Star):
                 if self.log:
                     self.log.event("autosync.loop_error", ok=False,
                                    error_kind="内部错误", detail=str(exc))
+
+    def _log_sync_report(self, uid: str, report) -> None:
+        """把一次自动同步的结果记进日志。
+
+        **失败时必须把原因带上来。** 原来这里只写 `ok=False`，`error_kind`
+        缺省就被渲染成 `[内部错误]` —— 而真正的原因（「凭据失效，会话已失效，
+        请重新登录」）只躺在上一行 `sync.fail` 里。摘要行说了个**错的**原因，
+        用户看到「内部错误」四个字，不知道该去重新登录 QOJ。
+        """
+        if not self.log:
+            return
+        fails = report.failures()
+        if not fails:
+            self.log.event("autosync.done", user_id=uid, ok=True,
+                           platforms=len(report.results), failed="")
+            return
+        self.log.event("autosync.done", user_id=uid, ok=False,
+                       error_kind=fails[0].error_kind or "内部错误",
+                       detail="；".join(r.line() for r in fails),
+                       platforms=len(report.results),
+                       failed=",".join(r.platform for r in fails))
 
     # ======================================================================
     # 存储与日志
@@ -1254,13 +1270,43 @@ class XcpcPlugin(Star):
                 body = md or text
                 if title:
                     body = "# %s\n\n%s" % (title, body)
-                url = await self.text_to_image(body)
-                yield event.image_result(url)
+                path = await self._render_text_image(body)
+                yield event.image_result(path)
                 return
             except Exception as exc:                       # noqa: BLE001
                 logger.warning("[xcpc] 文转图失败（%s），退回纯文本: %s", flag, exc)
         for part in self._chunk(text):
             yield event.plain_result(part)
+
+    async def _render_text_image(self, body: str) -> str:
+        """把 markdown 渲染成**本机**图片，返回本地路径。
+
+        **刻意不走 `self.text_to_image()`。** 那是 AstrBot 的 Star API，内部固定
+        `render_t2i(text, use_network=True, return_url=True)` —— 会把正文 POST 到
+        官方的公共渲染服务（默认 `https://t2i.soulter.top/text2img`），再把结果
+        下载回来或者直接返回一个外链。三个问题：
+
+        1. **又慢又稳不了。** 真机实测同一段正文：走网络 **4.5s**，走本机 PIL
+           **0.1s** —— 45 倍。而慢还只是小事。
+        2. **外链会把消息弄丢。** `return_url=True` 拿到的是 `https://t2i.soulter.top/...`
+           这样的外链，交给 `event.image_result()` 之后要靠适配器再去下载 ——
+           那一步失败了**我们这边不报错**，异常处理根本轮不到，用户就是什么都收不到。
+           「渲染失败」和「渲染很慢」是同一个原因的两副面孔。
+        3. **正文不该出门。** 方案里有他的薄弱方向、通过率、题号和 handle。
+
+        所以直接调 renderer 并显式 `use_network=False`，只用本机那套纯 PIL 的
+        `LocalRenderStrategy`（800px 宽、自带中文字体、不需要浏览器）。
+        `use_network=False` 时 `render_t2i` 会忽略 `template_name` —— 本机渲染器
+        是 markdown-only 的，没有模板概念，传了也没用。
+        """
+        try:
+            from astrbot.core import html_renderer
+        except Exception:                                  # noqa: BLE001
+            # AstrBot 换了内部结构。退回官方 Star API：能用，但会走网络、
+            # 而且拿回来的是外链 —— 属于"总比什么都没有强"的兜底。
+            logger.warning("[xcpc] 拿不到 html_renderer，退回官方文转图 API")
+            return await self.text_to_image(body, return_url=False)
+        return await html_renderer.render_t2i(body, use_network=False)
 
     # ======================================================================
     # 指令都挂在 `xcpc` 这个指令组下面
