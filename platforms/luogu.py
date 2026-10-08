@@ -87,6 +87,50 @@ def _blocked(html: str) -> bool:
     return bool(_WELCOME_RE.search((html or "")[:4000]))
 
 
+# 洛谷的评测结果是**数字**，记录页只给数字：`{"status": 12, "score": 100}`。
+#
+# ⚠️ **不翻译就会静默算错，而且错得很像"他没做出来"。**
+# 全插件判断 AC 的地方是 `core/summary.py:_is_ac()`，它只认
+# OK / AC / ACCEPTED（CF 发的是 "OK"，AtCoder 发的是 "AC"）。
+# 旧代码直接 `str(r["status"])` 存进去，于是库里躺着的是 `"12"` ——
+# **333 条真 AC 全部算成"一次都没过"**。用户 2026-10-08 看到的
+# 「洛谷 733 提交 0 AC」就是这个，不是他的问题，是我的。
+#
+# 下面的码是**用真数据交叉验证过的**，不是抄的：
+#   `GET /record/296686294?_contentOnly=1` 的
+#   `detail.judgeResult.subtasks[].testCases[].status` 就是 12，同一层还带
+#   `"description": "ok accepted"` —— 12 = Accepted，板上钉钉。
+#   而 `status=14` 那条（记录级 score=40）的测试点里混着 `status=5`
+#   （`time: 1200`，超出该题限时）→ 5 = TLE，14 = Unaccepted（洛谷把
+#   **所有非满分**笼统归到这一类，0 分到 90 分都见过）。
+#   全量 733 条的实测分布：12 → 333 条（score 全是 100 或缺失）、
+#   14 → 397 条（score 0~100 都有）、2 → 3 条（score 缺失，编译失败）。
+#
+# **认不出的码返回 `LG<n>`**：它不会被 `_is_ac()` 认成 AC（安全方向），
+# 又能在统计里露出来 —— 比悄悄当成 WA 强，也比抛异常强。
+_LG_STATUS = {
+    0: "Waiting",
+    1: "Judging",
+    2: "CE",          # 实测：score 缺失，失败发生在 compileResult
+    3: "OLE",
+    4: "MLE",
+    5: "TLE",         # 实测：出现在 testCases 里，time=1200（该题限时 1000）
+    6: "WA",
+    7: "RE",
+    12: "AC",         # 实测：测试点 description = "ok accepted"
+    14: "WA",         # 洛谷叫 "Unaccepted"：只要不是满分就是它
+}
+
+
+def _lg_verdict(status) -> str:
+    """把洛谷的数字状态码翻成全插件统一的词表（见 `_LG_STATUS`）。"""
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return ""
+    return _LG_STATUS.get(code, "LG%d" % code)
+
+
 class Luogu:
     name = "luogu"
     supports_submissions = True
@@ -353,8 +397,7 @@ class Luogu:
                     platform=self.name,
                     submission_id=str(r.get("id") or ""),
                     problem_key=self.problem_key(pid),
-                    verdict=str(r.get("status")
-                                if r.get("status") is not None else ""),
+                    verdict=_lg_verdict(r.get("status")),
                     epoch=epoch,
                     language="",
                     difficulty=diff,

@@ -435,6 +435,87 @@ def test_provider_id():
           or "provider_id = await current_provider_id" in src)
 
 
+# ---------------------------------------------------------------------------
+# 10. 时长：标题里别写、VP 得给够（用户问「vp 真是 1.5h 吗」）
+# ---------------------------------------------------------------------------
+
+def test_vp_minutes():
+    """2026-10-08 真机反馈。
+
+    推送里那条任务写的是「轻量虚拟赛：挑一场最近的 Div.2/3 模拟 **1.5 小时**」，
+    而模型自己填的 `minutes` 是 **60** —— 用户一眼看出对不上，来问
+    「vp 真是 1.5h 吗」。这里其实是两个问题叠在一起：
+
+      1. 标题里的时长和 `minutes` 打架（他看到的和真排进日程的不是一回事）
+      2. **60 分钟根本不是一场 VP**（CF Div.2 是 135 分钟、ABC 是 100 分钟）
+    """
+    print("\n[10] 标题里的时长 / VP 时长")
+
+    check("「1.5 小时」→ 90 分钟",
+          llmm._title_minutes("模拟 1.5 小时") == [90],
+          repr(llmm._title_minutes("模拟 1.5 小时")))
+    check("「90 分钟」→ 90",
+          llmm._title_minutes("限时 90 分钟") == [90],
+          repr(llmm._title_minutes("限时 90 分钟")))
+    check("「2h」→ 120", llmm._title_minutes("vp 2h") == [120],
+          repr(llmm._title_minutes("vp 2h")))
+    check("没写时长 → 空", llmm._title_minutes("做一道 dp") == [],
+          repr(llmm._title_minutes("做一道 dp")))
+    check("题号不会被误当成时长（1326D1）",
+          llmm._title_minutes("CF:1326D1 前缀后缀回文") == [],
+          repr(llmm._title_minutes("CF:1326D1 前缀后缀回文")))
+    check("Div.2 里的 2 也不算时长",
+          llmm._title_minutes("CF Div.2 虚拟赛") == [],
+          repr(llmm._title_minutes("CF Div.2 虚拟赛")))
+
+    # ---- 用户实际拿到的那一条 ----
+    payload = {"assessment": "x", "tasks": [
+        {"kind": "vp", "title": "轻量虚拟赛：模拟 1.5 小时", "problem": "",
+         "minutes": 60, "why": "找手感"}]}
+    plan = run(FakeContext(text=json.dumps(payload, ensure_ascii=False)))
+    check("★ 标题写 1.5 小时、minutes 填 60 → 被抓出来",
+          any("1.5 小时" in p for p in plan.problems), repr(plan.problems))
+    check("说明里点出「以 minutes 为准」",
+          any("以 minutes 为准" in p for p in plan.problems), repr(plan.problems))
+    check("★ minutes 原样保留（不偷偷改成 90 —— 那是他自己的预算）",
+          plan.tasks[0].minutes == 60, repr(plan.tasks[0].minutes))
+    check("用户能在输出里看到这个问题", "⚠" in plan.to_text())
+
+    # ---- 60 分钟打不了 VP ----
+    payload2 = {"assessment": "x", "tasks": [
+        {"kind": "vp", "title": "打一场 VP", "problem": "",
+         "minutes": 60, "why": "找手感"}]}
+    plan2 = run(FakeContext(text=json.dumps(payload2, ensure_ascii=False)))
+    check("★ 60 分钟的 VP 被点名（给出真实赛制长度）",
+          any("135" in p and "100" in p for p in plan2.problems),
+          repr(plan2.problems))
+    check("提示里给了出路（想短练就叫限时练）",
+          any("限时练" in p for p in plan2.problems), repr(plan2.problems))
+
+    # ---- 正常情况不误报 ----
+    payload3 = {"assessment": "x", "tasks": [
+        {"kind": "vp", "title": "CF Div.2 虚拟赛", "problem": "",
+         "minutes": 135, "why": "找手感"}]}
+    plan3 = run(FakeContext(text=json.dumps(payload3, ensure_ascii=False)))
+    check("★ 135 分钟、标题不带时长的 VP → 一条问题都不报",
+          plan3.problems == [], repr(plan3.problems))
+
+    payload4 = {"assessment": "x", "tasks": [
+        {"kind": "learn", "title": "过一遍 hash（25 分钟）", "problem": "",
+         "minutes": 25, "why": "打基础"}]}
+    plan4 = run(FakeContext(text=json.dumps(payload4, ensure_ascii=False)))
+    check("标题写的 25 分钟和 minutes 一致 → 不报",
+          plan4.problems == [], repr(plan4.problems))
+
+    # ---- 提示词里加的两条规则 ----
+    check("系统提示禁掉「标题里写时长」",
+          "一个字都不要提" in llmm.SYSTEM_PROMPT, "")
+    check("系统提示写明真实赛制长度",
+          "135" in llmm.SYSTEM_PROMPT and "100" in llmm.SYSTEM_PROMPT, "")
+    check("系统提示写明短于 90 分钟不叫 VP",
+          "90 分钟的不叫 VP" in llmm.SYSTEM_PROMPT, "")
+
+
 def main() -> int:
     print("=" * 62)
     print("core/llm.py 自测（假 provider，不调真模型）")
@@ -448,6 +529,7 @@ def main() -> int:
     test_dirty_input()
     test_prompt()
     test_provider_id()
+    test_vp_minutes()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

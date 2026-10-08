@@ -42,7 +42,7 @@ from typing import Any, Iterable
 
 # 用 PRAGMA user_version 做迁移版本号。
 # 加新表/加列时：**不要改老语句**，在后面追加一条 _MIGRATIONS 项。
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _TABLES_V1 = """
 -- 用户与账号绑定。
@@ -218,6 +218,37 @@ _MIGRATIONS: list[tuple[int, list[str]]] = [
             updated_at  TEXT NOT NULL
         )""",
         """CREATE INDEX IF NOT EXISTS idx_dashlink_user ON dashboard_links(user_id)""",
+    ]),
+    (5, [
+        # ---- 评测结果词表修复（2026-10-08）----
+        #
+        # 洛谷的 `status` 是**数字**，旧代码直接 `str()` 存了进去。
+        # 而判断 AC 的 `core/summary.py:_is_ac()` 只认 OK / AC / ACCEPTED
+        # （CF 发 "OK"、AtCoder 发 "AC"）—— 于是 333 条真 AC 被算成
+        # "一次都没过"，用户看到「洛谷 733 提交 0 AC」。
+        #
+        # 代码已经改了（`platforms/luogu.py:_lg_verdict`），但**老行不会自己变**：
+        # 游标早已推进，下次同步只拉新的，这 700 多行会永远是错的。
+        # 所以在库里一次性翻新。幂等 —— 翻完就没有 '12'/'14'/'2' 了。
+        """UPDATE submissions SET verdict='AC'
+           WHERE platform='luogu' AND verdict='12'""",
+        """UPDATE submissions SET verdict='WA'
+           WHERE platform='luogu' AND verdict='14'""",
+        """UPDATE submissions SET verdict='CE'
+           WHERE platform='luogu' AND verdict='2'""",
+        # ---- QOJ 的脏数据必须**删掉**，翻新没有意义 ----
+        #
+        # 旧代码抓的是 `/submissions`（**漏了 `?submitter=`**），那是 QOJ 的
+        # **全站最近提交**，不是这个人的。存进来的是陌生人的记录
+        # （lrmlrm、pino、Crazyouth…），而所谓 "verdict" 抓的是那一行里
+        # 第一个"长得像英文单词"的单元格 —— 于是**提交者用户名**和
+        # **语言**（`C++26`）被当成了评测结果。
+        # 这些行没有一条属于用户，翻新没有意义，只能清掉重拉。
+        """DELETE FROM submissions WHERE platform='qoj'""",
+        # 游标一起清掉 —— 不清的话重拉时"比游标旧的"会被整片跳过，
+        # 反而把他真正的记录也挡在外面。清空之后下一次同步是**全量**。
+        """UPDATE sync_state SET last_epoch=NULL, last_ok_at=NULL
+           WHERE platform='qoj'""",
     ]),
 ]
 

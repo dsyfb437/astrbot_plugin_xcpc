@@ -233,6 +233,94 @@ def test_corrupt() -> None:
     asyncio.run(main())
 
 
+def test_migration_v5() -> None:
+    """v5 = 「洛谷 0 AC + QOJ 全是别人」这两个 bug 的**数据侧**修复。
+
+    光改代码不够：游标早就推进了，下次同步只拉新的，库里那 700 多行
+    错数据会永远错下去。所以老行要在库里一次性翻新。
+    """
+    print("\n[5] v5 迁移：库里已经存坏的行怎么翻新")
+
+    tmp = tempfile.mkdtemp(prefix="xcpc_db5_")
+    conn = dbm.connect_sync(os.path.join(tmp, "xcpc.db"))
+    dbm.migrate_sync(conn)
+
+    def sub(uid, pf, sid, verdict, epoch=1000):
+        conn.execute(
+            "INSERT INTO submissions (user_id, platform, submission_id, "
+            "problem_key, verdict, epoch) VALUES (?, ?, ?, ?, ?, ?)",
+            (uid, pf, sid, "%s:%s" % (pf.upper(), sid), verdict, epoch))
+
+    # ---- 脏数据的形态**抄自用户服务器上的真实库** ----
+    sub("u1", "luogu", "1", "12")     # 333 条真 AC，全被存成数字
+    sub("u1", "luogu", "2", "14")     # 396 条
+    sub("u1", "luogu", "3", "2")      # 3 条
+    sub("u1", "luogu", "4", "99")     # 认不出的码：别乱改，让它在统计里露出来
+    sub("u1", "codeforces", "c1", "OK")     # 本来就对
+    sub("u1", "atcoder", "a1", "AC")        # 本来就对
+    sub("u1", "qoj", "q1", "lrmlrm")        # ★ 别人的数据，verdict 是人名
+    sub("u1", "qoj", "q2", "C++26")         # ★ verdict 是语言
+    for pf, ep in (("qoj", 1791418428), ("luogu", 1788592435),
+                   ("codeforces", 1790442284)):
+        conn.execute("INSERT INTO sync_state (user_id, platform, last_epoch, "
+                     "last_ok_at) VALUES ('u1', ?, ?, '2026-10-08 07:00:00')",
+                     (pf, ep))
+    conn.commit()
+
+    # ---- 装回 v4：这就是"用户服务器升级前"的那个库 ----
+    conn.execute("PRAGMA user_version=4")
+    conn.commit()
+
+    v = dbm.migrate_sync(conn)
+    check("迁到 v5", v == 5 and dbm.SCHEMA_VERSION == 5, "实际 %d" % v)
+
+    def one(sql, *a):
+        return conn.execute(sql, a).fetchone()[0]
+
+    check("★ 洛谷 '12' → 'AC'（「0 AC」的直接修复）",
+          one("SELECT verdict FROM submissions WHERE submission_id='1'") == "AC",
+          repr(one("SELECT verdict FROM submissions WHERE submission_id='1'")))
+    check("洛谷 '14' → 'WA'",
+          one("SELECT verdict FROM submissions WHERE submission_id='2'") == "WA",
+          repr(one("SELECT verdict FROM submissions WHERE submission_id='2'")))
+    check("洛谷 '2' → 'CE'",
+          one("SELECT verdict FROM submissions WHERE submission_id='3'") == "CE",
+          repr(one("SELECT verdict FROM submissions WHERE submission_id='3'")))
+    check("认不出的码不被乱改（还是 '99'）",
+          one("SELECT verdict FROM submissions WHERE submission_id='4'") == "99")
+    check("CF 的 'OK' 没被动（迁移不该误伤对的平台）",
+          one("SELECT verdict FROM submissions WHERE submission_id='c1'") == "OK")
+    check("AtCoder 的 'AC' 没被动",
+          one("SELECT verdict FROM submissions WHERE submission_id='a1'") == "AC")
+    check("★ 修完之后洛谷有 1 条被 _is_ac 认的（迁移之前是 0）",
+          one("SELECT COUNT(*) FROM submissions WHERE platform='luogu' "
+              "AND UPPER(verdict) IN ('OK','AC','ACCEPTED')") == 1)
+
+    check("★ QOJ 的脏行全删了（那些记录根本不属于他，翻新没意义）",
+          one("SELECT COUNT(*) FROM submissions WHERE platform='qoj'") == 0)
+    check("★ QOJ 的游标也清了（不清的话重拉时会被旧游标整片挡住）",
+          one("SELECT last_epoch FROM sync_state WHERE platform='qoj'") is None)
+    check("QOJ 的 last_ok_at 也清了",
+          one("SELECT last_ok_at FROM sync_state WHERE platform='qoj'") is None)
+    check("洛谷的游标没被动（他自己的记录是真的）",
+          one("SELECT last_epoch FROM sync_state WHERE platform='luogu'")
+          == 1788592435)
+    check("CF 的游标没被动",
+          one("SELECT last_epoch FROM sync_state WHERE platform='codeforces'")
+          == 1790442284)
+
+    # ---- 幂等：再跑一次什么都不该变 ----
+    conn.execute("PRAGMA user_version=4")
+    conn.commit()
+    dbm.migrate_sync(conn)
+    check("重复迁移是幂等的（版本回到 5）", dbm.schema_version_sync(conn) == 5)
+    check("重复迁移后洛谷仍是 4 行",
+          one("SELECT COUNT(*) FROM submissions WHERE platform='luogu'") == 4)
+    check("重复迁移后 QOJ 仍是 0 行",
+          one("SELECT COUNT(*) FROM submissions WHERE platform='qoj'") == 0)
+    conn.close()
+
+
 def main() -> int:
     print("=" * 60)
     print("core/db.py 自测")
@@ -241,6 +329,7 @@ def main() -> int:
     test_async_wrapper()
     test_concurrency()
     test_corrupt()
+    test_migration_v5()
     print("\n" + "=" * 60)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 60)

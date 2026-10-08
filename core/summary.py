@@ -45,6 +45,26 @@ AVOID_GAP = 300
 # 在这个 tag 上的题量占总量的比例低于这个值，算"碰得少"
 AVOID_SHARE = 0.04
 
+# ---- 「绕不过去」的方向 ------------------------------------------------
+#
+# ⚠️ 排序**不能只看 gap**。gap 回答的是"这个方向比整体难多少"，
+# 但它**没回答"这个方向在 XCPC 里多常见"**。
+#
+# 真机反馈：模型拿到的是 `string suffix structures`（用户一共只碰过 1 题），
+# 用户看完直接问「dp 的权重是不是该大一点」—— 他 dp 也只做了几道，
+# 但**一场区域赛里 dp 几乎必然出现，后缀结构可能一整年碰不到一次**。
+# 同样的 25 分钟花在 dp 上，期望收益高得多。
+#
+# 这张表只是"至少绕不过去"的那一批，**不是重要性排序** ——
+# 真正的频率信号来自题库题量（见下面 AVOID_FREQ_BOOST）。
+AVOID_CORE_TAGS = {
+    "dp", "graphs", "data structures", "greedy", "math",
+    "implementation", "trees", "dsu", "shortest paths",
+    "binary search", "sortings", "constructive algorithms",
+}
+AVOID_CORE_BOOST = 1.8      # 核心方向的 gap 乘这个再参与排序
+AVOID_FREQ_BOOST = 0.3      # 题库题量第一的 tag 再乘 1.3，其余线性递减
+
 
 def _band(d: int | None, size: int = BAND) -> str:
     if d is None:
@@ -185,11 +205,15 @@ class Summary:
             # 按"高出整体中位多少"排序（`avoided` 已经排好），
             # 挑最突出的几条，其余只报个数。
             top = self.avoided[:6]
+            L.append("  **这一段是按「难度差 × 这个方向有多常见」排的，不是只按难度差。**"
+                     " 一场区域赛里 dp / 图论几乎必然出现，冷门考点可能一整年碰不到一次 ——"
+                     " 所以**先补排在前面的**。带「绕不过去」标记的是核心方向。")
             for a in top:
                 L.append("  %s：只做过 %d 题（占全部 %.1f%%），"
-                         "该类题在题库里的中位难度 %s，比整体中位高 %.0f"
+                         "该类题在题库里的中位难度 %s，比整体中位高 %.0f%s"
                          % (a["tag"], a["count"], a["share"] * 100,
-                            a["bank_median"], a["gap"]))
+                            a["bank_median"], a["gap"],
+                            "　← **绕不过去的方向**" if a.get("core") else ""))
             if len(self.avoided) > len(top):
                 rest = "、".join(x["tag"] for x in self.avoided[len(top):])
                 L.append("  （另有 %d 个方向也符合这个特征：%s。"
@@ -464,7 +488,21 @@ async def build(store, user_id: str, *, platform_names: dict | None = None,
                         "bank_median": med, "overall_median": overall_med,
                         "gap": gap, "bank_count": len(diffs),
                     })
-            s.avoided.sort(key=lambda a: -a["gap"])
+            # ★ 排序 = 难度差 × 这个方向有多常见。
+            #
+            # 光按 `gap` 排，会把「题库中位难度最高」的方向顶到最前面 ——
+            # 而那通常是又偏又难的冷门考点（后缀结构、fft…），
+            # 真正该补的 dp / 图论反而排在后面。用户一眼就看出来了。
+            top_bank = max((a["bank_count"] for a in s.avoided), default=0)
+            for a in s.avoided:
+                a["core"] = a["tag"].lower() in AVOID_CORE_TAGS
+                score = a["gap"] * (AVOID_CORE_BOOST if a["core"] else 1.0)
+                if top_bank:
+                    # 题库题量是**数据里的真实频率信号**（题库是 CF 全量），
+                    # 不是我手写的一张"重要性表"。
+                    score *= 1.0 + AVOID_FREQ_BOOST * (a["bank_count"] / top_bank)
+                a["score"] = score
+            s.avoided.sort(key=lambda a: (-a["score"], a["tag"]))
             if s.avoided:
                 s.notes.append(
                     "「疑似难度回避」只是一个**假设**，不是结论 —— "

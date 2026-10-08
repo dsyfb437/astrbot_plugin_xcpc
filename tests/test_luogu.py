@@ -32,8 +32,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
-from platforms.luogu import Luogu, LEVEL_NAMES, _blocked  # noqa: E402
+from platforms.luogu import Luogu, LEVEL_NAMES, _blocked, _lg_verdict  # noqa: E402
 from platforms.base import Fetched  # noqa: E402
+from core.summary import _is_ac  # noqa: E402
 
 PASS = 0
 FAIL = 0
@@ -373,8 +374,14 @@ def test_fetch_submissions():
               repr(got.items[0].difficulty) if got.ok else "")
         check("难度来源标 luogu_level",
               got.ok and got.items[0].difficulty_source == "luogu_level", "")
-        check("verdict 是字符串（不是 None）",
-              got.ok and got.items[0].verdict == "12",
+        # ⚠️ 这里原来断言的是 `verdict == "12"` —— **等于把 bug 写进了测试**。
+        # 洛谷给的是数字码，而全插件判断 AC 的 `_is_ac()` 只认
+        # OK / AC / ACCEPTED，于是 333 条真 AC 被算成"一次都没过"
+        # （用户看到的「洛谷 733 提交 0 AC」）。
+        # 测试照着错误实现写，就是给 bug 发了张通行证 —— 这已经是第二次了
+        # （上一个是 `test_main_static` 抄了官方签名却不检查调用点）。
+        check("★ verdict 翻成了 AC（不是数字 12）",
+              got.ok and got.items[0].verdict == "AC",
               repr(got.items[0].verdict) if got.ok else "")
 
         # --- 6.1b ★ 游标：洛谷**从来不设 cursor**，于是 `save_sync_ok`
@@ -511,6 +518,39 @@ def test_fetch_submissions():
     asyncio.run(main())
 
 
+def test_lg_verdict():
+    print("\n[7] 洛谷数字状态码 → 统一词表（「0 AC」的根因）")
+
+    # ⚠️ 这些映射不是从文档抄的，是拿真记录交叉验证出来的
+    # （证据写在 platforms/luogu.py 的 _LG_STATUS 上方）：
+    #   /record/296686294 的 detail.judgeResult 里测试点 status=12，
+    #   同一层带着 description="ok accepted"；
+    #   status=14 那条记录总分 score=40，测试点里混着 status=5 且
+    #   单点 time=1200ms（→ TLE）。
+    check("12 → AC", _lg_verdict(12) == "AC", repr(_lg_verdict(12)))
+    check("14 → WA（洛谷把它叫 Unaccepted，0~100 分都归这里）",
+          _lg_verdict(14) == "WA", repr(_lg_verdict(14)))
+    check("2 → CE（全站那 3 条 score 是空的）",
+          _lg_verdict(2) == "CE", repr(_lg_verdict(2)))
+    check("5 → TLE", _lg_verdict(5) == "TLE", repr(_lg_verdict(5)))
+    check('字符串 "12" 也认（JSON 里可能是字符串）',
+          _lg_verdict("12") == "AC", repr(_lg_verdict("12")))
+    check("None → 空串", _lg_verdict(None) == "", repr(_lg_verdict(None)))
+    check("空串 → 空串", _lg_verdict("") == "", repr(_lg_verdict("")))
+    check("认不出的码 → LG<code>，不会冒充 AC",
+          _lg_verdict(99) == "LG99", repr(_lg_verdict(99)))
+
+    # ★ 下面三条才是「0 AC」的真正回归点：翻译出来的东西必须能被
+    #   全插件判断 AC 的那个函数认出来 —— **两边分头改就会再次失配**，
+    #   而这正是这次事故的形状（一个平台存数字码，另一个函数只认英文词）。
+    check("★ 翻出来的 AC 确实被 _is_ac() 认（0 AC 的直接回归）",
+          bool(_is_ac(_lg_verdict(12))), repr(_lg_verdict(12)))
+    check("★ 而翻译之前的裸数字不被认 —— 这就是 bug 本身",
+          not _is_ac("12"), repr("12"))
+    check("★ 认不出的码也不会被当成 AC",
+          not _is_ac(_lg_verdict(99)), repr(_lg_verdict(99)))
+
+
 def main() -> int:
     print("=" * 62)
     print("洛谷适配器离线自测")
@@ -521,6 +561,7 @@ def main() -> int:
     test_levels()
     test_login_honest()
     test_fetch_submissions()
+    test_lg_verdict()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

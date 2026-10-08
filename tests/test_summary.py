@@ -343,6 +343,89 @@ def test_execution():
     asyncio.run(main())
 
 
+# ---------------------------------------------------------------------------
+# 9. 回避方向的排序：不能只看难度差（用户问「dp 的权重是不是该大一点」）
+# ---------------------------------------------------------------------------
+
+def test_avoidance_weight():
+    """2026-10-08 真机反馈。
+
+    用户的推送里，第一个回避方向是 `string suffix structures`（他只碰过 1 题），
+    他看完直接问「dp 是目标权重是不是应该大一点」。他说得对：`gap` 只回答
+    "这个方向比整体难多少"，完全没回答"这个方向有多常见"。一场区域赛里
+    dp 几乎必然出现，后缀结构可能一整年碰不到一次 —— 先补哪个不用想。
+
+    这一节要钉住的是：**即使 fft 的难度差更大，dp 也得排在它前面**。
+    """
+    print("\n[9] 回避方向的排序权重（难度差 × 有多常见）")
+
+    async def main():
+        db, store = await fresh()
+        await store.ensure_user("u1")
+
+        probs = []
+        # dp：题库里量很大（500 题），难度 2400
+        for i in range(500):
+            probs.append(Problem("codeforces", "CF:DP%d" % i, "dp%d" % i,
+                                 tags=["dp"], difficulty=2400,
+                                 difficulty_source="cf_rating"))
+        # fft：更偏更难（3000），但题库里只有 30 题
+        for i in range(30):
+            probs.append(Problem("codeforces", "CF:FF%d" % i, "ff%d" % i,
+                                 tags=["fft"], difficulty=3000,
+                                 difficulty_source="cf_rating"))
+        # 垫底的简单题，占多数好把整体中位压到 1400
+        for i in range(800):
+            probs.append(Problem("codeforces", "CF:MA%d" % i, "ma%d" % i,
+                                 tags=["math"], difficulty=1400,
+                                 difficulty_source="cf_rating"))
+        await store.upsert_problems("codeforces", probs)
+
+        # 他只做 math，dp / fft 一个没碰
+        subs = [sub(i, "CF:MA%d" % i, diff=1400) for i in range(100)]
+        await store.upsert_submissions("u1", "codeforces", subs)
+
+        bank = {"codeforces": {}}
+        for p in probs:
+            bank["codeforces"][p.problem_key] = {
+                "tags": p.tags, "difficulty": p.difficulty,
+                "difficulty_source": p.difficulty_source, "title": p.title}
+
+        s = await summ.build(store, "u1", bank=bank)
+        order = [a["tag"] for a in s.avoided]
+        check("dp 和 fft 都被认成回避方向",
+              "dp" in order and "fft" in order, repr(order))
+
+        dp = [a for a in s.avoided if a["tag"] == "dp"]
+        fft = [a for a in s.avoided if a["tag"] == "fft"]
+        if dp and fft:
+            check("前提：fft 的难度差**更大**（3000 vs 2400）",
+                  fft[0]["gap"] > dp[0]["gap"],
+                  "fft %.0f vs dp %.0f" % (fft[0]["gap"], dp[0]["gap"]))
+            check("★ 但 dp 排在 fft 前面（核心方向 + 题库里常见）",
+                  order.index("dp") < order.index("fft"), repr(order))
+            check("★ 只按 gap 排的话 fft 才是第一 —— 那正是用户看到的那一幕",
+                  fft[0]["gap"] == max(a["gap"] for a in s.avoided), repr(order))
+            check("dp 被标成绕不过去的方向",
+                  dp[0].get("core") is True, repr(dp[0].get("core")))
+            check("fft 没被标", fft[0].get("core") is False,
+                  repr(fft[0].get("core")))
+            check("每条都留了可比的 score（不是黑箱排序）",
+                  all("score" in a for a in s.avoided), "")
+            check("dp 的 score 确实比 fft 高",
+                  dp[0]["score"] > fft[0]["score"],
+                  "dp %.0f vs fft %.0f" % (dp[0]["score"], fft[0]["score"]))
+
+        text = s.to_text()
+        check("★ 汇总里说清楚排序不是只按难度差",
+              "有多常见" in text, "")
+        check("核心方向在正文里带标记", "绕不过去" in text, "")
+
+        await db.close()
+
+    asyncio.run(main())
+
+
 def main() -> int:
     print("=" * 62)
     print("core/summary.py 自测")
@@ -350,6 +433,7 @@ def main() -> int:
     test_shrink()
     test_no_cross_source()
     test_avoidance()
+    test_avoidance_weight()
     test_empty_data()
     test_candidates()
     test_missing_bank()

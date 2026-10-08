@@ -154,6 +154,14 @@ SYSTEM_PROMPT = """你是一个 XCPC（ICPC/CCPC）备赛教练。用户会给�
    优先安排一道那个方向的题（用候选池里对应标签的）。
    但也不要一次全塞 —— 一道就够。
 7. **`assessment` 要引用具体数字**，不要空泛地说"继续加油"。
+8. **时长只写在 `minutes` 里，`title` 里一个字都不要提。**
+   不要写「模拟 1.5 小时」这种 —— 真机反馈过：标题写着"1.5 小时"，
+   而 `minutes` 填的是 60，用户一眼就看出对不上。
+   你要真想让他打 90 分钟，就把 `minutes` 填成 90。
+9. **打 VP 就按真实赛制给足时间**：CF Div.2/Div.3 是 **135 分钟**，
+   ABC 是 **100 分钟**。**短于 90 分钟的不叫 VP** —— 那是"限时练"，
+   请改用 `practice`。打 VP 那天，这一场就是他今天的全部任务，
+   别再往上叠三道题。
 
 ## 语气
 
@@ -212,6 +220,33 @@ def extract_json(text: str) -> dict:
     return data
 
 
+# ---- 标题里的时长（真机翻车现场）----------------------------------------
+#
+# 模型给的 `title` 是「轻量虚拟赛：挑一场最近的 Div.2/3 模拟 **1.5 小时**」，
+# 而它自己填的 `minutes` 是 **60** —— 用户看一眼就发现对不上，来问
+# 「vp 真是 1.5h 吗」。答案：他那天拿到的是 60 分钟的预算，
+# 而**真实的 VP 根本打不了 60 分钟**（CF Div.2 是 135 分钟、ABC 是 100）。
+#
+# 两头都要治：提示词里禁掉"标题写时长"，校验里再把漏网的抓出来。
+_DURATION_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(小时|个小时|h|hours?|hour|分钟|min|minutes?|minute)")
+_VP_MIN_MINUTES = 90        # 短于这个就不该叫 VP
+
+
+def _title_minutes(title: str) -> list[int]:
+    """把标题里明写着的时长抠出来，换算成分钟。「1.5 小时」→ [90]。"""
+    out: list[int] = []
+    for num, unit in _DURATION_RE.findall(title or ""):
+        try:
+            v = float(num)
+        except ValueError:
+            continue
+        if unit.startswith(("小时", "个小时", "h", "hour")):
+            v *= 60
+        out.append(int(round(v)))
+    return out
+
+
 def validate(data: dict, candidates: list[dict], *,
              max_minutes: int = 200, date: str = "") -> Plan:
     """校验并转成 `Plan`。
@@ -268,10 +303,30 @@ def validate(data: dict, candidates: list[dict], *,
             minutes = 0
         total_minutes += minutes
 
+        title = (str(t.get("title") or "").strip()[:200]
+                 or KIND_LABEL.get(kind, kind))
+
+        # ---- 标题里写的时长必须和 minutes 对得上 ----
+        # 真实翻车现场：title 是「…模拟 1.5 小时」，minutes 却是 60。
+        # 用户一眼就看出来了。以 minutes 为准 —— 那才是真被排进日程的值，
+        # 标题里本来就不该写时长。
+        said = _title_minutes(title)
+        if said and minutes and not any(abs(s - minutes) <= 5 for s in said):
+            plan.problems.append(
+                "第 %d 个任务的标题写着「%s」（= %s 分钟），但 minutes 是 %d —— "
+                "**以 minutes 为准，标题里别写时长**"
+                % (i + 1, title, "/".join(str(s) for s in said), minutes))
+
+        # ---- 叫 VP 就得真的是 VP ----
+        # 60 分钟打不了任何一场真比赛（CF Div.2 = 135 分钟，ABC = 100 分钟）。
+        if kind == "vp" and minutes and minutes < _VP_MIN_MINUTES:
+            plan.problems.append(
+                "第 %d 个是 VP，但只给了 %d 分钟 —— 真实的 CF Div.2 是 135 分钟、"
+                "ABC 是 100 分钟，短于 %d 分钟打不了；只想短练就改成「限时练」"
+                % (i + 1, minutes, _VP_MIN_MINUTES))
+
         plan.tasks.append(Task(
-            kind=kind,
-            title=str(t.get("title") or "").strip()[:200] or KIND_LABEL.get(kind, kind),
-            problem=problem, minutes=minutes,
+            kind=kind, title=title, problem=problem, minutes=minutes,
             why=str(t.get("why") or "").strip()[:500]))
 
     if total_minutes > max_minutes:
