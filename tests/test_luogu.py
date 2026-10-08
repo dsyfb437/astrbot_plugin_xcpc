@@ -837,6 +837,157 @@ def test_fetch_problems():
     asyncio.run(main())
 
 
+# ---------------------------------------------------------------------------
+# 9. 比赛记录（data.elo 那条嵌套链）
+# ---------------------------------------------------------------------------
+
+def _elo_node(cid, name, start, rating, prev_diff=None, previous=None):
+    node = {
+        "rating": rating, "time": start,
+        "contest": {"id": cid, "startTime": start, "endTime": start + 7200,
+                    "name": name},
+        "userCount": 10,
+    }
+    if prev_diff is not None:
+        node["prevDiff"] = prev_diff
+    if previous is not None:
+        node["previous"] = previous
+    return node
+
+
+# 结构抄自真机响应（2026-10-08 实测 uid=1823658）。
+# ⚠️ 关键点：**顶层只有 2 条，但链上还挂着更早的场次** ——
+#    只读顶层会安静地少掉一半比赛，而且看起来完全正常。
+ELO_USER_JSON = {
+    "instance": "main", "template": "user.show", "status": 200,
+    "data": {
+        "user": {"uid": "1823658", "name": "dsyfb437",
+                 "passedProblemCount": 303, "elo": None},
+        "elo": [
+            _elo_node(293373, "【LGR-274-Div.2】洛谷 3 月月赛 II", 1774072800, 1270,
+                      prev_diff=17,
+                      previous=_elo_node(282947, "【LGR-267-Div.2】洛谷 2 月月赛 II",
+                                         1770789600, 1253, prev_diff=103,
+                                         previous=_elo_node(236252, "【LGR-266-Div.2】",
+                                                            1770530400, 1150,
+                                                            prev_diff=72))),
+            # 第二条链**汇进**第一条（共享 236252）—— 去重必须挡住
+            _elo_node(232936, "【LGR-236-Div.2】洛谷 8 月月赛 II", 1754719200, 3,
+                      previous=_elo_node(250409, "【LGR-238-Div.2】", 1755064800, 462,
+                                         prev_diff=459,
+                                         previous=_elo_node(236252, "【LGR-266-Div.2】",
+                                                            1770530400, 1150,
+                                                            prev_diff=72))),
+        ],
+        "gu": {"rating": 135},
+    },
+}
+
+ELO_USER_HTML = """<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<script id="lentille-context" type="application/json">%s</script>
+</head><body></body></html>""" % json.dumps(ELO_USER_JSON, ensure_ascii=False)
+
+
+def test_fetch_contests():
+    print("\n[9] 比赛记录（data.elo）")
+
+    async def main():
+        # 能力位和实现必须一致 —— v0.5.19 的教训：`supports_problems = True`
+        # 曾经挂在一个**没有 fetch_problems 的类**上
+        check("★ 声明了 supports_contests 就真的有 fetch_contests",
+              Luogu.supports_contests is True
+              and callable(getattr(Luogu, "fetch_contests", None)),
+              repr(Luogu.supports_contests))
+
+        c = FakeClient({"/user/": Resp(200, ELO_USER_HTML)})
+        got = await Luogu().fetch_contests("1823658", c)
+        check("拉成功了", got.ok, got.detail)
+        check("★ 顺着 previous 链走平了（顶层 2 条 → 5 场）",
+              got.ok and len(got.items) == 5,
+              repr(len(got.items) if got.ok else got.detail))
+        if got.ok and got.items:
+            by_id = {x.contest_id: x for x in got.items}
+            check("★ 链上的比赛没漏（236252 在内）", "236252" in by_id,
+                  repr(sorted(by_id)))
+            check("★ 共享的 id 只进一次（去重挡得住）",
+                  len(got.items) == len(by_id), repr(len(got.items)))
+            check("名字取的是 contest.name",
+                  by_id["293373"].name.startswith("【LGR-274"),
+                  repr(by_id["293373"].name))
+            check("start_epoch 取的是 contest.startTime",
+                  by_id["293373"].start_epoch == 1774072800,
+                  repr(by_id["293373"].start_epoch))
+            check("★ rating_delta 取的是 prevDiff（+17）",
+                  by_id["293373"].rating_delta == 17,
+                  repr(by_id["293373"].rating_delta))
+            check("链尾那场没有 prevDiff → delta 是 None（不是 0）",
+                  by_id["232936"].rating_delta is None,
+                  repr(by_id["232936"].rating_delta))
+            check("平台标 luogu",
+                  all(x.platform == "luogu" for x in got.items))
+            check("按时间升序排",
+                  [x.start_epoch for x in got.items]
+                  == sorted(x.start_epoch for x in got.items),
+                  repr([x.start_epoch for x in got.items][:3]))
+            check("kind 是 rated",
+                  all(x.kind == "rated" for x in got.items))
+
+        # ★ v0.5.21 的教训用在这里：`[]`（确实没打过）和 `None`（拿不到）
+        #   必须分开 —— 合并的话一次改版会**安静地清空**他的比赛记录
+        check("★ 真没打过 → []（不是 None）",
+              Luogu.parse_contest_history({"data": {"elo": []}}) == [])
+        check("★ 结构变了 → None（不是 []，不能当成「没打过」）",
+              Luogu.parse_contest_history({"data": {"elo": "boom"}}) is None)
+        check("完全没有 elo 字段 → None",
+              Luogu.parse_contest_history({"data": {}}) is None)
+
+        empty = await Luogu().fetch_contests(
+            "1823658", FakeClient({"/user/": Resp(200, ELO_USER_HTML.replace(
+                '"elo": [', '"elo": [], "elo_old": ['))}))
+        check("elo 是空数组时 ok=True 且 0 场", empty.ok and empty.items == [],
+              repr((empty.ok, empty.items)))
+
+        bad = await Luogu().fetch_contests(
+            "1823658", FakeClient({"/user/": Resp(
+                200, ELO_USER_HTML.replace('"elo": [', '"elo": "x", "elo_old": ['))}))
+        check("★ elo 不是数组时报「页面结构变化」，不报 0 场",
+              (not bad.ok) and bad.error_kind == "页面结构变化",
+              repr((bad.ok, bad.error_kind, bad.detail)))
+
+        # uid 填错：页面结构对，但没有 user → 凭据失效（不是"他 0 场比赛"）
+        _nouser_html = ELO_USER_HTML.replace('"user": {', '"user_x": {').replace(
+            '"uid": "1823658"', '"uid": "999999"')
+        nouser = await Luogu().fetch_contests(
+            "999999", FakeClient({"/user/": Resp(200, _nouser_html)}))
+        check("uid 填错报「凭据失效」，不报 0 场",
+              (not nouser.ok) and nouser.error_kind == "凭据失效",
+              repr((nouser.ok, nouser.error_kind, nouser.detail)))
+
+        noctx = await Luogu().fetch_contests(
+            "1823658", FakeClient({"/user/": Resp(200, "<html>nope</html>")}))
+        check("没有 lentille-context 时报「页面结构变化」",
+              (not noctx.ok) and noctx.error_kind == "页面结构变化",
+              repr((noctx.ok, noctx.error_kind)))
+
+        blocked = await Luogu().fetch_contests(
+            "1823658", FakeClient({"/user/": Resp(200, WELCOME_HTML)}))
+        check("风控页报「挑战未过」",
+              (not blocked.ok) and blocked.error_kind == "挑战未过",
+              repr((blocked.ok, blocked.error_kind)))
+
+        bad500 = await Luogu().fetch_contests(
+            "1823658", FakeClient({"/user/": Resp(503, "")}))
+        check("非 2xx 报「网络不可达」",
+              (not bad500.ok) and bad500.error_kind == "网络不可达",
+              repr((bad500.ok, bad500.error_kind)))
+
+        check("没填 uid 直接报「凭据失效」",
+              (await Luogu().fetch_contests("", c)).error_kind == "凭据失效")
+
+    asyncio.run(main())
+
+
 def main() -> int:
     print("=" * 62)
     print("洛谷适配器离线自测")
@@ -849,6 +1000,7 @@ def main() -> int:
     test_fetch_submissions()
     test_lg_verdict()
     test_fetch_problems()
+    test_fetch_contests()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import re
 
-from .base import Fetched, Problem, Submission
+from .base import ContestRecord, Fetched, Problem, Submission
 
 ORIGIN = "https://www.luogu.com.cn"
 
@@ -67,6 +67,13 @@ _ALGORITHM_TAG_TYPE = 2
 _PROBLEM_LIST_URL = ORIGIN + "/problem/list?page=%d&_contentOnly=1"
 _PROBLEM_PER_PAGE = 50
 _MAX_PROBLEM_PAGES = 400        # 354 够用，留点余量以防题数涨了
+
+# 用户页 —— 比赛记录藏在 `data.elo` 里（见 `parse_contest_history`）。
+# **不需要登录**：实测无 Cookie 从服务器打也是 200（这点和提交记录相反）。
+_USER_URL = ORIGIN + "/user/%s?_contentOnly=1"
+# `elo` 是嵌套链表（`previous` 指向更早一场），理论上能无限深。
+# 给个上限纯属防御：链里出现环时 `seen` 会先兜住，这个数字是第二道保险。
+_MAX_ELO_CHAIN = 500
 
 # 「Welcome - Luogu Spilopelia」曾经被我当成"第二层挑战页"的特征。
 #
@@ -152,7 +159,7 @@ def _lg_verdict(status) -> str:
 class Luogu:
     name = "luogu"
     supports_submissions = True
-    supports_contests = False       # 洛谷的比赛记录没找到可用入口
+    supports_contests = True        # 用户页的 data.elo 里有完整参赛史（v0.5.22 起）
     supports_problems = True
     min_interval = 1.5              # 有 CDN 反爬，慢一点
 
@@ -621,5 +628,112 @@ class Luogu:
                        truncated=truncated)
 
     async def fetch_contests(self, uid: str, client=None) -> Fetched:
-        return Fetched(ok=False, error_kind="页面结构变化",
-                       detail="洛谷的比赛记录还没做（暂不支持）")
+        """拉洛谷的比赛记录。
+
+        实测（2026-10-08，**不带 Cookie** 从服务器发起）：
+            `GET /user/<uid>?_contentOnly=1` → 200 / 9219 字节，
+            数据在 `lentille-context` 的 `data.elo` 里：
+
+                [{"rating": 1270, "time": 1774087200, "prevDiff": 17,
+                  "contest": {"id": 293373, "startTime": ..., "endTime": ...,
+                              "name": "【LGR-274-Div.2】洛谷 3 月月赛 II"},
+                  "previous": { ... 更早一场，同样的形状 ... }},
+                 ... 顶层 10 条 ...]
+
+        ⚠️ **`previous` 是嵌套的**：顶层只有 10 条，但每条都挂着更早的链。
+        只读顶层会漏掉更早的比赛，而且**看起来完全正常**（就是"只有 10 场"）。
+        所以要顺着链走平，并用 `seen` 防环。
+
+        以前这里是 `return Fetched(ok=False, error_kind="页面结构变化",
+        detail="洛谷的比赛记录还没做（暂不支持）")` —— 一个诚实的桩，
+        但它意味着**洛谷 733 条提交、10 场比赛一条都进不了库**。
+        """
+        if not uid:
+            return Fetched(ok=False, error_kind="凭据失效", detail="没填洛谷 uid")
+        try:
+            resp = await client.get(_USER_URL % uid)
+        except Exception as exc:
+            return Fetched(ok=False, error_kind=getattr(exc, "kind", "网络不可达"),
+                           detail=str(exc))
+        if not resp:
+            return Fetched(ok=False, error_kind="网络不可达",
+                           detail="用户页返回 HTTP %d" % resp.status)
+        if _blocked(resp.text):
+            return Fetched(ok=False, error_kind="挑战未过", detail="被风控页挡住")
+
+        payload = _context_payload(resp.text)
+        if payload is None:
+            return Fetched(ok=False, error_kind="页面结构变化",
+                           detail="用户页里没有 lentille-context")
+
+        data = payload.get("data") or {}
+        user = data.get("user") or {}
+        if not isinstance(user, dict) or not user:
+            # 页面结构对、但没有这个用户 —— 是 uid 填错了，不是"他 0 场比赛"
+            return Fetched(ok=False, error_kind="凭据失效",
+                           detail="洛谷上没有这个用户：%s" % uid)
+
+        items = self.parse_contest_history(payload)
+        if items is None:
+            # `elo` 不是数组 —— 结构变了，**不能当成"没打过比赛"**
+            return Fetched(ok=False, error_kind="页面结构变化",
+                           detail="用户页里 data.elo 不是数组"
+                                  "（是 %s）" % type(data.get("elo")).__name__)
+        return Fetched(items=items, ok=True)   # `[]` 就是确实没打过
+
+    @staticmethod
+    def parse_contest_history(payload: dict):
+        """把 `data.elo` 那条嵌套链走平成 `ContestRecord` 列表。
+
+        返回 `None` 表示"拿不到"（`elo` 不是数组 —— 结构变了），
+        `[]` 表示"确实没打过比赛"。**这两个必须分开**：
+        合并的话，一次改版会安静地清空他的比赛记录。
+
+        分开成静态方法是为了**能离线测**。
+        """
+        data = (payload or {}).get("data") or {}
+        elo = data.get("elo")
+        if not isinstance(elo, list):
+            return None
+
+        out, seen = [], set()
+        for head in elo:
+            node, depth = head, 0
+            while isinstance(node, dict) and depth < _MAX_ELO_CHAIN:
+                contest = node.get("contest")
+                if not isinstance(contest, dict):
+                    break
+                cid = contest.get("id")
+                if cid is None:
+                    break
+                ckey = str(cid)
+                if ckey in seen:
+                    break          # 链是共享的，同一个 id 只进一次
+                seen.add(ckey)
+
+                start = contest.get("startTime")
+                if start is None:
+                    start = node.get("time")        # 退而求其次
+                try:
+                    start = int(start)
+                except (TypeError, ValueError):
+                    start = 0
+
+                # `prevDiff` 就是这一场打出来的涨跌
+                # （实测：3 → 462 那场 prevDiff=459，对得上）
+                delta = node.get("prevDiff")
+                try:
+                    delta = int(delta) if delta is not None else None
+                except (TypeError, ValueError):
+                    delta = None
+
+                out.append(ContestRecord(
+                    platform="luogu", contest_id=ckey,
+                    name=str(contest.get("name") or ckey),
+                    start_epoch=start, rating_delta=delta, kind="rated"))
+
+                node = node.get("previous")
+                depth += 1
+
+        out.sort(key=lambda c: (c.start_epoch, c.contest_id))
+        return out
