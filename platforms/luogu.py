@@ -50,6 +50,10 @@ _CONTEXT_RE = re.compile(
 # 标签表（ID → 名字）。`window.__luoguTagRequest = '/_lfe/tags'`
 _TAG_URL = ORIGIN + "/_lfe/tags"
 
+# 洛谷标签表里只有 `type=2`（Algorithm / 算法）是"算法方向"。
+# 六种 type 的分布见 `fetch_tag_map()` 的 docstring —— 505 个标签里只有 262 个是。
+_ALGORITHM_TAG_TYPE = 2
+
 # 题库列表。**实测（2026-10-08）**：
 #     GET /problem/list?page=N&_contentOnly=1  →  200 / 61 KB（**HTML**，不是 JSON）
 #     数据同样在 `lentille-context` 里：
@@ -279,6 +283,25 @@ class Luogu:
 
         拿不到就返回空 dict —— 上层会把 tags 留成 None（"给不出"），
         **而不是编一个名字**。
+
+        ★ **只保留算法标签（`type == 2`）**（v0.5.20）。
+        洛谷的标签表有 **505 个标签、六种 type**：
+
+            type=2 Algorithm 算法        262 个  ← 只有这类是"算法方向"
+            type=3 Origin    来源         82 个  USACO / NOI / 各省省选 / 洛谷原创
+            type=6 Others    其他         63 个  算法 / 数据结构 / 来源 / 时间（分类节点）
+            type=1 Region    区域         56 个  重庆 / 四川 / 浙江 / 北京 …
+            type=4 Time      时间         37 个  1997 / 1998 / … / 2015
+            type=5 SpecialProblem 特殊题目  5 个  交互题 / 提交答案 / Special Judge / O2优化
+
+        不滤的话，"相对薄弱"里会冒出「O2优化：AC 38 题 / 提交 215，
+        通过率 27%」「梦熊比赛」「天津」「2007」这种 —— **它们不是算法方向，
+        拿来做训练诊断没有意义**，而且样本量还特别大，会把真正的薄弱项挤下去。
+        这就是 v0.5.19 把洛谷题库拉起来之后真机上立刻看到的样子。
+
+        ⚠️ 判据是**「这个标签自己带没带 type」**，不是"响应里有没有 types 数组"：
+        认不出的结构里标签**原样保留** —— 结构变了就少给几个标签，
+        比静默地把整张表丢空要好（后者看起来像"洛谷不给标签"）。
         """
         try:
             resp = await client.get(_TAG_URL)
@@ -286,7 +309,7 @@ class Luogu:
         except Exception:
             return {}
 
-        # 把几种可能的形式都摊平成一个 list of {id, name}
+        # 把几种可能的形式都摊平成一个 list of {id, name, type}
         items = []
         if isinstance(data, dict):
             inner = data.get("tags")
@@ -296,7 +319,8 @@ class Luogu:
                 for k, v in inner.items():
                     try:
                         items.append({"id": int(k),
-                                      "name": v.get("name") if isinstance(v, dict) else str(v)})
+                                      "name": v.get("name") if isinstance(v, dict) else str(v),
+                                      "type": v.get("type") if isinstance(v, dict) else None})
                     except (TypeError, ValueError):
                         continue
             else:
@@ -304,7 +328,8 @@ class Luogu:
                 for k, v in data.items():
                     try:
                         items.append({"id": int(k),
-                                      "name": v.get("name") if isinstance(v, dict) else str(v)})
+                                      "name": v.get("name") if isinstance(v, dict) else str(v),
+                                      "type": v.get("type") if isinstance(v, dict) else None})
                     except (TypeError, ValueError):
                         continue
         elif isinstance(data, list):
@@ -318,6 +343,14 @@ class Luogu:
                 tid = int(item["id"])
             except (TypeError, ValueError):
                 continue
+            # ★ 带 type 且不是算法类的，直接不要（见 docstring 里的 505/262）
+            ttype = item.get("type")
+            if ttype is not None:
+                try:
+                    if int(ttype) != _ALGORITHM_TAG_TYPE:
+                        continue
+                except (TypeError, ValueError):
+                    pass          # type 是个认不出的东西 —— 当成"不知道"，保留
             name = str(item.get("name") or "").strip()
             if name:
                 out[tid] = name

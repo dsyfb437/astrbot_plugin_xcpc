@@ -92,6 +92,11 @@ P3803_HTML = """<!DOCTYPE html><html><head>
 }, ensure_ascii=False)
 
 # ⚠️ 脏点 3：标签表**外面包了一层 `tags` 键**（真实结构就是这样）
+#
+# ⚠️ 脏点 4（v0.5.20 才发现）：**505 个标签里只有 262 个是算法方向**。
+#     其余是区域 / 来源 / 时间 / 特殊题目 / 其他 —— 不滤的话「相对薄弱」
+#     里会冒出「O2优化：AC 38 题 / 提交 215，通过率 27%」「梦熊比赛」
+#     「天津」「2007」，而且样本量大得把真正的薄弱项挤下去。
 TAGS_JSON = {
     "tags": [
         {"id": -2, "name": "语言入门", "type": 2, "parent": None},
@@ -100,9 +105,30 @@ TAGS_JSON = {
         {"id": 8, "name": "快速傅里叶变换 FFT", "type": 2, "parent": None},
         {"id": 9, "name": "快速数论变换 NTT", "type": 2, "parent": None},
         {"id": 10, "name": "", "type": 2, "parent": None},      # 空名字，应被丢
+        # ↓ 下面这些**不该出现在算法标签里**
+        {"id": 100, "name": "重庆", "type": 1, "parent": None},        # Region
+        {"id": 101, "name": "NOI", "type": 3, "parent": None},         # Origin
+        {"id": 102, "name": "2007", "type": 4, "parent": None},        # Time
+        {"id": 103, "name": "O2优化", "type": 5, "parent": None},      # SpecialProblem
+        {"id": 104, "name": "Special Judge", "type": 5, "parent": None},
+        {"id": 105, "name": "数据结构", "type": 6, "parent": None},    # Others（分类节点）
+        {"id": 106, "name": "洛谷月赛", "type": 3, "parent": None},
     ],
-    "types": [{"id": 2, "type": "Algorithm", "name": "算法"}],
+    "types": [
+        {"id": 1, "type": "Region", "name": "区域"},
+        {"id": 2, "type": "Algorithm", "name": "算法"},
+        {"id": 3, "type": "Origin", "name": "来源"},
+        {"id": 4, "type": "Time", "name": "时间"},
+        {"id": 5, "type": "SpecialProblem", "name": "特殊题目"},
+        {"id": 6, "type": "Others", "name": "其他"},
+    ],
     "_locale": "zh-CN",
+}
+
+# 没有 `type` 字段的结构（真机换版式时可能长这样）—— 这时**原样保留**，
+# 因为"认不出"不等于"不是算法标签"
+TAGS_NO_TYPE_JSON = {
+    "tags": [{"id": 1, "name": "模拟"}, {"id": 100, "name": "重庆"}],
 }
 
 # ⚠️ 脏点 3（2026-10-08 才发现）：`Welcome - Luogu Spilopelia` **不是**风控页特征。
@@ -272,6 +298,28 @@ def test_tags():
         check("空名字被丢掉", 10 not in tmap, repr(tmap))
         check("整体数字段没被当成标签",
               all(not isinstance(v, dict) for v in tmap.values()))
+
+        # ★ v0.5.20：只留算法标签（type=2）
+        bad = {i: tmap.get(i) for i in (100, 101, 102, 103, 104, 105, 106)}
+        check("★ 区域（重庆）/ 来源（NOI、洛谷月赛）/ 时间（2007）/ "
+              "特殊（O2优化、Special Judge）/ 其他（数据结构）全部丢掉",
+              all(v is None for v in bad.values()), repr(bad))
+        check("★ 「O2优化」「Special Judge」不进标签表（它们不是算法方向）",
+              "O2优化" not in tmap.values()
+              and "Special Judge" not in tmap.values(),
+              repr(sorted(tmap.values())))
+        check("算法标签照留（FFT / NTT / 递归都在）",
+              tmap.get(8) == "快速傅里叶变换 FFT" and tmap.get(7) == "递归"
+              and tmap.get(9) == "快速数论变换 NTT",
+              repr(sorted(tmap.values())))
+
+        # 结构里没有 type 字段时**原样保留**（"认不出"≠"不是算法标签"）
+        c2 = FakeClient({"/_lfe/tags": Resp(200, json.dumps(
+            TAGS_NO_TYPE_JSON, ensure_ascii=False))})
+        tmap3 = await Luogu().fetch_tag_map(c2)
+        check("★ 标签里没有 type 字段时不乱滤（原样保留）",
+              tmap3.get(1) == "模拟" and tmap3.get(100) == "重庆",
+              repr(tmap3))
 
         # 拿不到标签表时不能崩，也不能编
         class Boom(FakeClient):
