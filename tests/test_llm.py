@@ -172,12 +172,39 @@ def test_fabricated_problem():
     check("任务本身没被丢掉（只是题号剔了）", len(plan.tasks) == 2)
     check("用户能看到这个问题", "⚠" in plan.to_text())
 
-    # 大小写/空格差异应该被容忍
+    # 大小写/空格差异应该被容忍，并且**回填成候选池里的规范 key**
     payload2 = {"assessment": "x", "tasks": [
         {"kind": "practice", "title": "t", "problem": "cf:1900d", "minutes": 10}]}
     plan2 = run(FakeContext(text=json.dumps(payload2)))
-    check("大小写差异被容忍（不算编造）", plan2.tasks[0].problem == "cf:1900d",
+    check("大小写差异被容忍（不算编造）", plan2.tasks[0].problem == "CF:1900D",
           repr(plan2.tasks[0].problem))
+    check("补全成规范 key，不是原样存模型写的那串",
+          plan2.tasks[0].problem in {"CF:1900D"}, repr(plan2.tasks[0].problem))
+    check("容忍时不该报「编造」", not any("编" in p for p in plan2.problems),
+          repr(plan2.problems))
+
+    # ★ v0.5.21：模型**把整行候选抄进来**（题号 + 标题）—— 它没编，是我们认不出
+    #   真机现场：三个任务全被剔，而那三个题号一个不差地都在候选池里
+    for raw, want in [
+        ("CF:1900D  Some Title", "CF:1900D"),
+        ("CF:1900D Some Title", "CF:1900D"),
+        ("  CF:1900D  ", "CF:1900D"),
+        ("cf:1900d  some title", "CF:1900D"),
+    ]:
+        p3 = run(FakeContext(text=json.dumps({"assessment": "x", "tasks": [
+            {"kind": "practice", "title": "t", "problem": raw, "minutes": 10}]})))
+        check("抄了标题也认得出：%r" % raw, p3.tasks[0].problem == want,
+              repr(p3.tasks[0].problem))
+        check("这时**不能**说人家编题号：%r" % raw,
+              not any("编" in x for x in p3.problems), repr(p3.problems))
+
+    # 但真的不在池子里的，还是要拦（别把容忍做成放行）
+    p4 = run(FakeContext(text=json.dumps({"assessment": "x", "tasks": [
+        {"kind": "practice", "title": "t",
+         "problem": "CF:9999Z  Totally Made Up", "minutes": 10}]})))
+    check("★ 容忍抄标题 ≠ 放行编造：池子里没有的还是剔除",
+          p4.tasks[0].problem == "" and any("编" in x for x in p4.problems),
+          repr((p4.tasks[0].problem, p4.problems)))
 
 
 # ---------------------------------------------------------------------------

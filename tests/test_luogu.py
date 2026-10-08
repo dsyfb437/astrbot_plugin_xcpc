@@ -749,6 +749,32 @@ def test_fetch_problems():
               got2.ok and got2.items[0].tags is None,
               repr(got2.ok and got2.items[0].tags))
 
+        # ★ v0.5.21：标签表**拿到了**，但这题一个算法标签都没有
+        #   → tags 必须是 `[]`（"确实没有"），**不能是 None**（"给不出"）。
+        #   真实翻车：老实现见名字为空就留 None，入库时
+        #   `tags_json=COALESCE(excluded, 老值)` 见 None 就保留旧值 ——
+        #   重拉 17686 道题花掉 13 分钟，`O2优化`/`天津`/`2007` 一个没冲掉。
+        class OnlyBadTagsClient(PageClient):
+            async def get(self, url, **kw):
+                if "_lfe/tags" in url:
+                    return Resp(200, json.dumps(TAGS_JSON, ensure_ascii=False))
+                if "/problem/list" in url:
+                    # 每道题只挂非算法标签（重庆 type1 / 2007 type4 / O2优化 type5）
+                    start = 0
+                    rows = [lrow("P%05d" % i, "题%d" % i, 2, [100, 102, 103])
+                            for i in range(self.per)]
+                    return Resp(200, list_html(rows, count=self.total,
+                                               per_page=self.per))
+                return await PageClient.get(self, url, **kw)
+
+        got3 = await Luogu().fetch_problems(OnlyBadTagsClient(total=50))
+        check("★ 只有非算法标签的题：tags 是 []（确实没有），不是 None（给不出）",
+              got3.ok and got3.items and got3.items[0].tags == [],
+              repr(got3.ok and got3.items and got3.items[0].tags))
+        check("★ 这一条不等于「拿不到标签表」",
+              got3.ok and got3.items and got3.items[0].tags is not None,
+              repr(got3.ok and got3.items and got3.items[0].tags))
+
         # 第一页就被风控 → 如实报错，**不要返回空题库**
         # （空题库会让上层以为"洛谷没题"，而不是"没拉到"）
         #

@@ -214,7 +214,8 @@ SYSTEM_PROMPT = """你是一个 XCPC（ICPC/CCPC）备赛教练。用户会给�
     「brute force / data structures / implementation / trees」的数组题
     讲成"树入门题"。**候选池里标签越少，越接近"专练"**，优先挑那种。
 11. **汇总里说「只做过 0 题」时，那是"在我们看得见标签的数据里是 0"。**
-    题库目前只有 Codeforces，洛谷和 AtCoder 的题没有标签、不参与这个统计。
+    题库覆盖 CF（带标签）+ 洛谷（带标签）+ AtCoder（**没有标签**，
+    只贡献难度）。分母只会是**有标签的 AC 题**。
     不要把「只做过 0 题」扩写成「他完全没练过这个方向」。
 12. **不要评判他这个人。** 「明显在摆」「是不敢碰」「太懒」这类话不要出现。
     执行率低就说是**量排多了**，回避方向就说是**没找到合适的题源** ——
@@ -310,6 +311,40 @@ def _title_minutes(title: str) -> list[int]:
     return out
 
 
+def _match_problem_key(problem: str, valid_keys: set, normalized: dict) -> str:
+    """把模型写的题号对上候选池里的**规范 key**。对不上返回空串。
+
+    ★ 为什么要这么松（v0.5.21）：模型**经常把整行候选抄进 `problem` 字段**，
+    而不是只写题号 —— 汇总里的候选行长这样：
+
+        CF:981C  Useful Decomposition  难度 1400(cf_rating)  标签 implementation/trees
+
+    于是它写 `"CF:981C  Useful Decomposition"`。老实现只做
+    `problem in valid_keys`，**对不上就报「可能是模型编的题号」** ——
+    2026-10-08 真机上三个任务全被剔除，而那三个题号
+    （`CF:1028B` / `CF:981C` / `CF:1051A`）**一个不差地都在候选池里**。
+    工具对着正确的数据说"这是编的"，比放过去更坏。
+
+    所以依次试：原样 → 去空格 → **开头的第一个 token**（题号本身）→
+    大小写/空格归一。全都对不上才算真的不在池子里。
+    """
+    raw = str(problem or "").strip()
+    if not raw:
+        return ""
+    tries = [raw, raw.replace(" ", "")]
+    # 取开头的第一个 token：题号后面跟着标题时，题号就是它
+    first = raw.split()[0] if raw.split() else ""
+    if first and first != raw:
+        tries.extend([first, first.replace(" ", "")])
+    for c in tries:
+        if c in valid_keys:
+            return c
+        u = c.upper().replace(" ", "")
+        if u in normalized:
+            return normalized[u]
+    return ""
+
+
 def validate(data: dict, candidates: list[dict], *,
              max_minutes: int = 200, date: str = "") -> Plan:
     """校验并转成 `Plan`。
@@ -349,13 +384,15 @@ def validate(data: dict, candidates: list[dict], *,
 
         problem = str(t.get("problem") or "").strip()
         if problem:
-            key = problem.upper().replace(" ", "")
-            real = valid_keys and (problem in valid_keys or key in normalized)
+            # ★ 对不上时**用规范 key 回填**，不要把模型抄的整行原样存下来
+            real = _match_problem_key(problem, valid_keys, normalized)
             if not real:
                 # 这是最重要的一条校验：不能让它编题号
                 plan.problems.append(
                     "「%s」不在候选池里，**已剔除**（可能是模型编的题号）" % problem)
                 problem = ""
+            else:
+                problem = real
         try:
             minutes = int(t.get("minutes") or 0)
         except (TypeError, ValueError):

@@ -386,11 +386,10 @@ class Luogu:
         tags = None
         if parsed["tag_ids"]:
             tmap = tag_map if tag_map is not None else await self.fetch_tag_map(client)
-            names = [tmap.get(i) for i in parsed["tag_ids"]]
-            names = [n for n in names if n]
-            if names:
-                tags = names
-            # 拿不到名字就留 None（"给不出"），**不编**
+            if tmap:
+                # 拿得到表 → 列表（**可能是空的**："这题没有算法标签"是事实）
+                tags = [tmap[i] for i in parsed["tag_ids"] if i in tmap]
+            # 拿不到表就留 None（"给不出"），**不编**
 
         return Fetched(items=[Problem(
             platform=self.name,
@@ -468,12 +467,20 @@ class Luogu:
                 if key in seen:
                     continue
                 seen.add(key)
+                # ★ 三种情况要分清（v0.5.21）：
+                #   tag_map 拿到了 → names 是**列表**（可能是空的 ——
+                #     "这题没有任何算法标签"是个事实，要如实写进去）
+                #   tag_map 没拿到 → None（"给不出"，别拿空列表冒充）
+                #
+                # ⚠️ 老实现是「`got` 为空就留 None」，于是**只有非算法标签的题
+                # 全部写成 None**，而入库时 `tags_json=COALESCE(excluded, 老值)`
+                # 见 None 就**保留旧值** —— 改了过滤规则之后重拉一次题库，
+                # 库里那些 `O2优化` / `天津` / `2007` 一个都没被冲掉。
+                # 2026-10-08 真机就是这么发现的：重拉 17686 道题用掉 13 分钟，
+                # `added=0`，脏标签原封不动。
                 names = None
-                if p["tag_ids"] and tag_map:
-                    got = [tag_map.get(i) for i in p["tag_ids"]]
-                    got = [n for n in got if n]
-                    if got:
-                        names = got
+                if tag_map:
+                    names = [tag_map[i] for i in p["tag_ids"] if i in tag_map]
                 out.append(Problem(
                     platform=self.name,
                     problem_key=key,

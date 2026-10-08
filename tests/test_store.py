@@ -255,6 +255,38 @@ def test_difficulty_semantics():
         check("tags=[] 存成 '[]'（和 None 不同）", row["tags_json"] == "[]",
               repr(row["tags_json"]))
 
+        # ★ v0.5.21：**重新入库**时的语义 —— 这是 v0.5.20 修完过滤规则
+        #   却"重拉一次题库什么也没变"的根因。
+        #   老实现把"只有非算法标签的题"也算成 tags=None，
+        #   而 COALESCE 见 None 就保留旧值 → 脏标签永远冲不掉。
+        await s.upsert_problems("luogu", [
+            Problem(platform="luogu", problem_key="LG:P1000", title="脏",
+                    tags=["O2优化", "天津"], difficulty=2,
+                    difficulty_source="luogu_level")])
+        await s.upsert_problems("luogu", [
+            Problem(platform="luogu", problem_key="LG:P1000", title="净",
+                    tags=[], difficulty=2, difficulty_source="luogu_level")])
+        row = await s.get_problem("luogu", "LG:P1000")
+        check("★ tags=[] 会**冲掉**旧的脏标签（不是保留）",
+              row["tags_json"] == "[]", repr(row["tags_json"]))
+        check("标题也被更新了", row["title"] == "净", repr(row["title"]))
+
+        # 反过来：None 表示"这次给不出"，必须保留旧值
+        await s.upsert_problems("luogu", [
+            Problem(platform="luogu", problem_key="LG:P1000", title="净",
+                    tags=None, difficulty=2, difficulty_source="luogu_level")])
+        row = await s.get_problem("luogu", "LG:P1000")
+        check("★ tags=None 保留旧值（'给不出'不等于'没有'）",
+              row["tags_json"] == "[]", repr(row["tags_json"]))
+
+        # 难度同理
+        await s.upsert_problems("luogu", [
+            Problem(platform="luogu", problem_key="LG:P1000", title="净",
+                    tags=None, difficulty=None, difficulty_source="luogu_level")])
+        row = await s.get_problem("luogu", "LG:P1000")
+        check("难度 None 不抹掉已有值", row["difficulty"] == 2,
+              repr(row["difficulty"]))
+
         # 分数带带来源前缀
         check("分数带带来源前缀",
               stm.bucket(1500, "cf_rating") == "cf_rating:1400-1599",
