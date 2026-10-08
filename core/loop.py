@@ -84,19 +84,35 @@ class Loop:
         self.recorder = recorder
         self.syncer = syncer
 
-    async def _load_bank(self, limit_per_platform: int = 4000) -> dict:
+    async def _load_bank(self, limit_per_platform: int = 0) -> dict:
         """把题库标注读成 `{platform: {key: {...}}}`。
 
-        对上万题的题库做全量读取会占内存，所以**只读有标签或有难度的**，
-        并且限量。题库标注的作用是"给候选池和回避判定提供依据"，
-        不需要全量。
+        ⚠️⚠️ 这里**曾经是 `LIMIT 4000`，而且不带 `ORDER BY`** ——
+        在 11425 道 CF 题里**任意切了 4000 道**。后果不是"少一点数据"，
+        而是**两份数据对不上**：
+
+          · 候选池只从那 4000 道里挑；
+          · 更致命的是 `prob_tags` 也只认得那 4000 道 ——
+            他 AC 的 90 道 CF 题里只有 **6 道**能在里面找到。
+
+        于是「疑似难度回避」是在 **6 道题**上算出来的：dp 只做过 2 题
+        → share = 2/6 = 33%，**远高于 4% 的阈值，dp 直接被判定为"不算回避"**。
+        用户问「dp 的权重是不是该大一点」，而 dp 那条**根本没能进列表**。
+        任何"在切片上算比例"的统计都会这样静默地烂掉。
+
+        一万多道题的标注撑死十几 MB，**这点内存不值得拿正确性去换**。
+        `limit_per_platform=0` 表示不限制。
         """
         bank: dict[str, dict] = {}
         for p in ("codeforces", "atcoder", "luogu", "qoj"):
+            sql = ("SELECT problem_key, title, tags_json, difficulty, difficulty_source "
+                   "FROM problems WHERE platform=?")
+            params: tuple = (p,)
+            if int(limit_per_platform) > 0:
+                sql += " LIMIT ?"
+                params = (p, int(limit_per_platform))
             try:
-                rows = await self.db.query(
-                    "SELECT problem_key, title, tags_json, difficulty, difficulty_source "
-                    "FROM problems WHERE platform=? LIMIT ?", (p, int(limit_per_platform)))
+                rows = await self.db.query(sql, params)
             except Exception:
                 continue
             if not rows:
@@ -162,11 +178,26 @@ class Loop:
         want = [a["tag"] for a in base.avoided][:2]
         avoided_cands = []
         if want and median is not None:
-            avoided_cands = summ.pick_candidates(
-                subs, bank, want_tags=want, limit=12,
-                min_difficulty=int(median) - 200,
-                max_difficulty=int(median) + 900,     # 放宽：难的方向本来就该更高
-                source=primary or "cf_rating")
+            # **按 tag 分别挑，再轮流交错** —— 不能一次把两个 tag 丢进去。
+            #
+            # 真机翻车现场：want = ["trees", "data structures"]，一次挑出来的
+            # 前 12 条**全是树题**（trees 命中数高的排在前面），模型于是就排了
+            # 三道树题 —— 而提示词里明明写着「一道就够」。
+            # **候选池的排列顺序本身就是给模型的暗示**，它比提示词里多写一句管用。
+            per = max(3, 12 // len(want))
+            pools = [
+                summ.pick_candidates(
+                    subs, bank, want_tags=[t], limit=per,
+                    min_difficulty=int(median) - 200,
+                    max_difficulty=int(median) + 900,   # 放宽：难的方向本来就该更高
+                    source=primary or "cf_rating")
+                for t in want
+            ]
+            # 轮流取，让两个方向在列表顶部交替出现（trees, dp, trees, dp…）
+            for i in range(max((len(p) for p in pools), default=0)):
+                for p in pools:
+                    if i < len(p):
+                        avoided_cands.append(p[i])
 
         normal_cands = summ.pick_candidates(
             subs, bank, limit=36,

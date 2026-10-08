@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
@@ -36,13 +37,26 @@ MIN_SAMPLE_LOW = 8
 MIN_SAMPLE_MID = 20
 MIN_SAMPLE_HIGH = 50
 
-# 分数带宽度
+# 分数带宽度。**只对 CF rating 成立** —— 三套尺子不能共用一套档。
 BAND = 200
+
+# 洛谷的 1-7 档是**另一套尺子**：档宽就是 1，而且每档有名字。
+LUOGU_BAND_NAMES = {
+    1: "入门", 2: "普及-", 3: "普及/提高-", 4: "普及+/提高",
+    5: "提高+/省选-", 6: "省选/NOI-", 7: "NOI/NOI+/CTSC",
+}
+
+# AtCoder 的 IRT 是估计值，可正可负，档宽 400（社区习惯的段位步长）。
+ATC_BAND = 400
 
 # 难度回避的判定阈值：
 # 某 tag 的"中位难度"比该来源整体中位难度高出这么多，就算偏难的方向
 AVOID_GAP = 300
-# 在这个 tag 上的题量占总量的比例低于这个值，算"碰得少"
+# 在他**有标签的**已 AC 题里占比低于这个值，算"碰得少"。
+#
+# ⚠️ 分母是"有标签的题"，不是"全部 AC 题"。洛谷的题不在题库里 → 没有标签，
+# 拿它当分母会把 share 稀释成 1/5，凭空多出一堆"回避方向"。
+# 这个数要能解释清楚：**我们只在看得见标签的那部分数据上做判断。**
 AVOID_SHARE = 0.04
 
 # ---- 「绕不过去」的方向 ------------------------------------------------
@@ -56,21 +70,39 @@ AVOID_SHARE = 0.04
 # 同样的 25 分钟花在 dp 上，期望收益高得多。
 #
 # 这张表只是"至少绕不过去"的那一批，**不是重要性排序** ——
-# 真正的频率信号来自题库题量（见下面 AVOID_FREQ_BOOST）。
+# 真正的频率信号来自题库题量（见排序那段的 `sqrt(题量/最大题量)`）。
 AVOID_CORE_TAGS = {
     "dp", "graphs", "data structures", "greedy", "math",
     "implementation", "trees", "dsu", "shortest paths",
     "binary search", "sortings", "constructive algorithms",
 }
-AVOID_CORE_BOOST = 1.8      # 核心方向的 gap 乘这个再参与排序
-AVOID_FREQ_BOOST = 0.3      # 题库题量第一的 tag 再乘 1.3，其余线性递减
+AVOID_CORE_BOOST = 1.8      # 核心方向的 score 再乘这个（只拉开"核心 vs 冷门"）
+# 频率项的权重**不是常数**，见下面排序那段的推导：
+#   score = (gap / AVOID_GAP) × sqrt(题量 / 最大题量) × 核心加成
+# 早期版本用 `1 + 0.3×占比`（最多 1.3 倍），被证明压不住 gap —— 已废弃。
 
 
-def _band(d: int | None, size: int = BAND) -> str:
+def _band(d: int | None, source: str = "cf_rating") -> str:
+    """把难度分档。**分档方式按来源走** —— 三套尺子不能共用一套档。
+
+    ⚠️ 真机翻车现场（v0.5.14 修）：洛谷的 difficulty 是 **1-7 档**，
+    却按 CF 的 200 一档去分，于是 733 条洛谷提交**全部落进「0-199」**，
+    汇总里赫然写着「【洛谷 1-7 档】0-199：308 题」。
+    模型照抄，用户看到的就是「洛谷 308 题全是 0-199 档」。
+
+    讽刺的是提示词硬规则第 3 条**明令禁止**跨平台比较难度 ——
+    结果是我们在**渲染层**先破的戒。规则写在提示词里，尺子却错在代码里。
+    """
     if d is None:
         return ""
-    lo = (int(d) // size) * size
-    return "%d-%d" % (lo, lo + size - 1)
+    d = int(d)
+    if source == "luogu_level":
+        return "%d 档（%s）" % (d, LUOGU_BAND_NAMES.get(d, "未知"))
+    if source == "atcoder_irt":
+        lo = (d // ATC_BAND) * ATC_BAND
+        return "%d~%d" % (lo, lo + ATC_BAND - 1)
+    lo = (d // BAND) * BAND
+    return "%d-%d" % (lo, lo + BAND - 1)
 
 
 def _median(xs: list[int]) -> float | None:
@@ -209,9 +241,10 @@ class Summary:
                      " 一场区域赛里 dp / 图论几乎必然出现，冷门考点可能一整年碰不到一次 ——"
                      " 所以**先补排在前面的**。带「绕不过去」标记的是核心方向。")
             for a in top:
-                L.append("  %s：只做过 %d 题（占全部 %.1f%%），"
-                         "该类题在题库里的中位难度 %s，比整体中位高 %.0f%s"
+                L.append("  %s：只做过 %d 题（%.1f%%，分母是 %s 道**有标签的** AC 题），"
+                         "该类题在题库里有 %s 道，中位难度 %s，比整体中位高 %.0f%s"
                          % (a["tag"], a["count"], a["share"] * 100,
+                            a.get("share_base") or 0, a["bank_count"],
                             a["bank_median"], a["gap"],
                             "　← **绕不过去的方向**" if a.get("core") else ""))
             if len(self.avoided) > len(top):
@@ -270,12 +303,28 @@ class Summary:
             L.append("")
 
         if self.candidates:
+            # 把"这道题命中哪个回避方向"直接标在候选池上。
+            #
+            # 真机翻车现场：候选池前 12 条全是 trees（因为回避方向被排到最前），
+            # 模型就一口气排了三道树题 —— 而提示词里明明写着「一道就够」。
+            # **把判据摊在模型眼前，比在提示词里多写一句"不要贪多"管用。**
+            avoid_tags = {a["tag"].lower(): a["tag"] for a in self.avoided[:6]}
             L.append("## 候选题目（**只能从这里挑，题号不得编造**）")
+            if avoid_tags:
+                L.append("  标了「回避方向」的是上面那几条里的题 —— "
+                         "**最多挑一道**，别一场比赛全排同一个方向。")
             for c in self.candidates[:40]:
-                L.append("  %s  %s  难度 %s(%s)%s"
+                mark = ""
+                if avoid_tags:
+                    hit = [avoid_tags[t.lower()] for t in (c.get("tags") or [])
+                           if t.lower() in avoid_tags]
+                    if hit:
+                        mark = "　← 回避方向：" + "、".join(hit)
+                L.append("  %s  %s  难度 %s(%s)%s%s"
                          % (c["problem_key"], (c.get("title") or "")[:44],
                             c.get("difficulty"), c.get("difficulty_source"),
-                            ("  标签 " + "/".join(c["tags"])) if c.get("tags") else ""))
+                            ("  标签 " + "/".join(c["tags"])) if c.get("tags") else "",
+                            mark))
             L.append("")
 
         if self.notes:
@@ -296,9 +345,16 @@ class Summary:
 
 
 def _band_key(b: str) -> int:
+    """分档名 → 排序用的数字。
+
+    ⚠️ 不能再用 `b.split("-")[0]`：洛谷的档名里带减号
+    （「3 档（普及/提高-）」），split 完 `int()` 会炸成 0，
+    于是所有档挤在一起。直接用正则取**开头那个整数**。
+    """
+    m = re.match(r"\s*(-?\d+)", b or "")
     try:
-        return int(b.split("-")[0])
-    except (ValueError, IndexError):
+        return int(m.group(1)) if m else 0
+    except ValueError:
         return 0
 
 
@@ -375,7 +431,7 @@ async def build(store, user_id: str, *, platform_names: dict | None = None,
                     d = _field(r, "difficulty")
                     break
             if d is not None:
-                bands[_band(d)] += 1
+                bands[_band(d, src)] += 1
                 diffs.append(d)
         s.by_source[src] = {
             "label": SRC_LABEL.get(src, src),
@@ -473,6 +529,17 @@ async def build(store, user_id: str, *, platform_names: dict | None = None,
                 for t in (prob_tags.get(key) or []):
                     solved_by_tag[t] += 1
 
+            # ★ 分母是「**有标签**的已 AC 题」，不是「全部 AC 题」。
+            #
+            # 真机翻车现场：他 AC 了 444 题，但题库只有 CF 的（洛谷那 308 道
+            # 题根本不在题库里 → 没有标签）。拿 444 当分母的话，
+            # 一道 ds 题的 share = 1/444 = 0.2%，看着像"完全没碰过"，
+            # 而实际上在他**看得见标签的**题里要高得多。
+            # 更要命的是模型会把分母当成 444，输出「trees 和 graphs 各 0 题」，
+            # 用户一看就知道不对（他做过的题里明明有树）。
+            # **宁可说"我们只统计到 76 道"，也不要拿一个假的分母去吓人。**
+            tagged_solved = sum(1 for k in solved_keys if prob_tags.get(k))
+
             for tag, diffs in bank_tag_diff.items():
                 if len(diffs) < 20:        # 题库里这个 tag 题太少，不判
                     continue
@@ -480,33 +547,59 @@ async def build(store, user_id: str, *, platform_names: dict | None = None,
                 if med is None:
                     continue
                 count = solved_by_tag.get(tag, 0)
-                share = count / total_solved
+                share = (count / tagged_solved) if tagged_solved else 0.0
                 gap = med - overall_med
                 if gap >= AVOID_GAP and share < AVOID_SHARE:
                     s.avoided.append({
                         "tag": tag, "count": count, "share": share,
+                        "share_base": tagged_solved,
                         "bank_median": med, "overall_median": overall_med,
                         "gap": gap, "bank_count": len(diffs),
                     })
             # ★ 排序 = 难度差 × 这个方向有多常见。
             #
             # 光按 `gap` 排，会把「题库中位难度最高」的方向顶到最前面 ——
-            # 而那通常是又偏又难的冷门考点（后缀结构、fft…），
-            # 真正该补的 dp / 图论反而排在后面。用户一眼就看出来了。
+            # 而那通常是又偏又难的冷门考点（后缀结构、fft…）。
+            #
+            # v0.5.13 试过一版：gap × 核心加成 × (1 + 0.3×题量占比)。
+            # **真机验证下来没用** —— dp 从第 5 名挪到第 5 名，一步没动：
+            #   trees 1205 / ds 1119 / **fft 1115** / graphs 1031 / **dp 936**
+            # fft 全题库只有 117 道（占 1%），却因为中位难度高（2900）
+            # 稳稳压住 dp（2538 道，占 22%）。毛病出在**频率项只值 1.3 倍，
+            # 而 gap 的跨度有 2.75 倍** —— 频率根本没参与竞争。
+            #
+            # v0.5.14 改成**占比开平方**当乘数，让它和 gap 同一个量级：
+            #   score = (gap / AVOID_GAP) × sqrt(题量 / 最大题量) × 核心加成
+            # 开平方是刻意的：dp 2538 道 vs fft 117 道差 21 倍，
+            # 直接乘会把冷门方向彻底清零，而"冷门"不等于"不用补"。
+            # 开方后压到 4.6 倍，两边都还在桌上。
+            # 实测排序（用户真机数据，公式手算与代码输出逐条一致）：
+            #   trees 3.029 / graphs 3.000 / dsu 1.409 /
+            #   combinatorics 1.389 / divide and conquer 1.281 / shortest paths 1.182
+            # ⚠️ `top_bank` 取的是**回避列表内部**的最大题量（这次是 graphs 1208），
+            # 不是题库全量的最大 tag —— 列表已经滤过一遍（难且没碰过），
+            # 拿全量的 `implementation`（两千多道）当分母会把所有 score 压扁。
             top_bank = max((a["bank_count"] for a in s.avoided), default=0)
             for a in s.avoided:
                 a["core"] = a["tag"].lower() in AVOID_CORE_TAGS
-                score = a["gap"] * (AVOID_CORE_BOOST if a["core"] else 1.0)
+                score = a["gap"] / float(AVOID_GAP)
                 if top_bank:
                     # 题库题量是**数据里的真实频率信号**（题库是 CF 全量），
                     # 不是我手写的一张"重要性表"。
-                    score *= 1.0 + AVOID_FREQ_BOOST * (a["bank_count"] / top_bank)
+                    score *= math.sqrt(a["bank_count"] / float(top_bank))
+                if a["core"]:
+                    score *= AVOID_CORE_BOOST
                 a["score"] = score
             s.avoided.sort(key=lambda a: (-a["score"], a["tag"]))
             if s.avoided:
                 s.notes.append(
                     "「疑似难度回避」只是一个**假设**，不是结论 —— "
                     "也可能是不感兴趣、或者没有合适的题源。请结合用户自己的说法判断。")
+                s.notes.append(
+                    "「碰得少」的统计**只覆盖题库里有标签的题**（题库目前只有 CF）。"
+                    "洛谷 / AtCoder 的题没有标签，不在这个统计里 —— "
+                    "**不要把「只做过 0 题」说成「他完全没练过这个方向」**，"
+                    "只能说「在我们看得见标签的这部分数据里没练过」。")
 
     # ---- 活跃度 -------------------------------------------------------
     import time
@@ -651,8 +744,17 @@ def pick_candidates(subs: list, bank: dict, *, want_tags: list[str] | None = Non
                 "difficulty_source": info.get("difficulty_source"),
                 "_hit": hit, "_dist": abs(d - mid),
             })
-    # tag 命中多的优先，其次难度靠近区间中段
-    out.sort(key=lambda c: (-c["_hit"], c["_dist"]))
+    # tag 命中多的优先；命中数相同时，**标签少的优先**；最后看难度离区间中段多远。
+    #
+    # 「标签少优先」是 v0.5.14 加的。真机翻车现场：模型把
+    # `CF:1511C Yet Another Card Deck`（标签 brute force / data structures /
+    # implementation / trees）讲成"1100 的树入门题"，用户一看就知道不对 ——
+    # 那是一道数组题，`trees` 只是它五个标签里的一个。
+    # **标签是"这题会用到"，不是"这题练这个"。** 标签越少，越接近"专练"。
+    # 命中 0 个 tag 的常规候选不参与这条（否则没标签的题会全冒到前面）。
+    out.sort(key=lambda c: (-c["_hit"],
+                            len(c["tags"]) if c["_hit"] else 0,
+                            c["_dist"]))
     for c in out:
         c.pop("_hit", None)
         c.pop("_dist", None)

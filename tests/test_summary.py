@@ -426,6 +426,172 @@ def test_avoidance_weight():
     asyncio.run(main())
 
 
+def test_band_by_source():
+    """2026-10-08 真机反馈：`_band` 拿 CF 的尺子去量洛谷。
+
+    真机上 LLM 收到的那一行是：
+
+        【luogu_level，洛谷 1-7 档，中位难度 2.0】 0-199：308 题
+
+    洛谷的 difficulty 是 1..7，用 CF 那把 200 一档的尺子去分，
+    七个档全落进 `0-199`。而 `SYSTEM_PROMPT` 硬规则第 3 条明令禁止
+    跨平台比较难度 —— 规则写了，结果是我们在渲染层先破的戒。
+    """
+    print("\n[10] 分档要按难度来源换尺子")
+
+    check("CF 还是 200 一档", summ._band(1100) == "1000-1199", summ._band(1100))
+    check("显式传 cf_rating 也一样",
+          summ._band(2400, "cf_rating") == "2400-2599", summ._band(2400, "cf_rating"))
+    check("★ 洛谷直接用官方 1-7 档的名字，不折算成 rating",
+          summ._band(3, "luogu_level") == "3 档（普及/提高-）",
+          summ._band(3, "luogu_level"))
+    check("洛谷 1 档（入门）",
+          summ._band(1, "luogu_level") == "1 档（入门）", summ._band(1, "luogu_level"))
+    check("洛谷 7 档（NOI/NOI+/CTSC）",
+          summ._band(7, "luogu_level") == "7 档（NOI/NOI+/CTSC）",
+          summ._band(7, "luogu_level"))
+    check("★ 洛谷档名里带减号，`_band_key` 不能因此变成 0",
+          summ._band_key("3 档（普及/提高-）") == 3,
+          str(summ._band_key("3 档（普及/提高-）")))
+    check("`_band_key` 认 5 档（提高+/省选-）",
+          summ._band_key("5 档（提高+/省选-）") == 5,
+          str(summ._band_key("5 档（提高+/省选-）")))
+    check("`_band_key` 认 CF 的区间名",
+          summ._band_key("1000-1199") == 1000, str(summ._band_key("1000-1199")))
+    check("AtCoder IRT 可以是负数（档宽 400）",
+          summ._band(-50, "atcoder_irt") == "-400~-1",
+          summ._band(-50, "atcoder_irt"))
+    check("AtCoder IRT 正数", summ._band(800, "atcoder_irt") == "800~1199",
+          summ._band(800, "atcoder_irt"))
+
+
+def test_luogu_bands_in_text():
+    """七个档要逐条列出来，不能再并成一个 `0-199`。"""
+    print("\n[11] 洛谷的难度分布按 1-7 档列出")
+
+    async def main():
+        db, store = await fresh()
+        await store.ensure_user("u1")
+        await store.upsert_submissions("u1", "luogu", [
+            Submission(platform="luogu", submission_id="L%d" % i,
+                       problem_key="LG:P%d" % i, verdict="AC",
+                       epoch=1000 + i, difficulty=(i % 7) + 1,
+                       difficulty_source="luogu_level") for i in range(140)])
+
+        s = await summ.build(store, "u1", bank={"codeforces": {}})
+        text = s.to_text()
+
+        check("★ 不再出现 `0-199` 这一档", "0-199" not in text, "")
+        check("★ 1 档（入门）在", "1 档（入门）" in text, "")
+        check("3 档（普及/提高-）在 —— 档名里的减号没把它吃掉",
+              "3 档（普及/提高-）" in text, "")
+        check("7 档（NOI/NOI+/CTSC）在", "7 档（NOI/NOI+/CTSC）" in text, "")
+        check("七个档都单独成行",
+              all(("%d 档（" % k) in text for k in range(1, 8)), "")
+        check("来源标签还是「洛谷 1-7 档」", "洛谷 1-7 档" in text, "")
+        bands = (s.by_source.get("luogu_level") or {}).get("bands") or {}
+        check("分档结果真的有 7 个桶（不是 1 个）", len(bands) == 7, repr(sorted(bands)))
+        check("难度中位数是 2 这种小数字，不是 rating",
+              (s.by_source.get("luogu_level") or {}).get("median") == 4.0,
+              str((s.by_source.get("luogu_level") or {}).get("median")))
+        await db.close()
+
+    asyncio.run(main())
+
+
+async def _tagged_fixture():
+    """造一份"题库里只有 CF、洛谷题全没标签"的数据。
+
+    这正是真机上的样子：他 AC 了 444 题，但题库只有 CF 的 ——
+    洛谷那 308 道题不在题库里，压根没有标签。
+    """
+    db, store = await fresh()
+    await store.ensure_user("u1")
+    probs = []
+    for i in range(400):
+        probs.append(Problem("codeforces", "CF:TR%d" % i, "tr%d" % i,
+                             tags=["trees"], difficulty=2400,
+                             difficulty_source="cf_rating"))
+    for i in range(600):
+        probs.append(Problem("codeforces", "CF:MA%d" % i, "ma%d" % i,
+                             tags=["math"], difficulty=1400,
+                             difficulty_source="cf_rating"))
+    await store.upsert_problems("codeforces", probs)
+    # CF 上 AC 了 10 道 math（有标签）
+    await store.upsert_submissions("u1", "codeforces",
+                                   [sub(i, "CF:MA%d" % i, diff=1400)
+                                    for i in range(10)])
+    # 洛谷上又 AC 了 90 道（题库里没有洛谷题 → 没有标签）
+    await store.upsert_submissions("u1", "luogu", [
+        Submission(platform="luogu", submission_id="L%d" % i,
+                   problem_key="LG:P%d" % i, verdict="AC",
+                   epoch=2000 + i, difficulty=2,
+                   difficulty_source="luogu_level") for i in range(90)])
+    bank = {"codeforces": {}}
+    for p in probs:
+        bank["codeforces"][p.problem_key] = {
+            "tags": p.tags, "difficulty": p.difficulty,
+            "difficulty_source": p.difficulty_source, "title": p.title}
+    return db, store, bank
+
+
+def test_tagged_denominator():
+    """回避判定的分母只能是「**有标签的** AC 题」。
+
+    真机翻车：分母写成了"全部 AC 题"（444），而 `solved_by_tag` 只能数
+    有标签的题 —— 分母被稀释 5 倍，模型还会把它读成「444 题里 0 题」，
+    输出「trees 和 graphs 各 0 题」（用户一看就知道不对，他做过的题里
+    明明有树）。
+    """
+    print("\n[12] 回避判定的分母是「有标签的 AC 题」")
+
+    async def main():
+        db, store, bank = await _tagged_fixture()
+        s = await summ.build(store, "u1", bank=bank)
+        text = s.to_text()
+        tr = [a for a in s.avoided if a["tag"] == "trees"]
+        check("trees 被认成回避方向", bool(tr),
+              repr([a["tag"] for a in s.avoided]))
+        if tr:
+            check("★ 分母是 10（有标签的），不是 100（全部 AC）",
+                  tr[0]["share_base"] == 10, str(tr[0]["share_base"]))
+        check("★ 正文里也写的是 10", "分母是 10 道" in text, "")
+        check("不会写成 100 道", "分母是 100 道" not in text, "")
+        check("口径里说清了统计覆盖范围（题库只有 CF 的题有标签）",
+              any("标签" in n for n in s.notes), repr(s.notes))
+        await db.close()
+
+    asyncio.run(main())
+
+
+def test_candidate_avoid_marker():
+    """候选池里要**当场标出**哪些题属于回避方向。
+
+    真机翻车：候选池前 12 条全是树题（标签命中多的排前面），
+    模型就一口气排了三道树 —— 而提示词里明明写着「一道就够」。
+    光在提示词里加一句"不要贪多"没用，**把判据摊在它眼前**才有用。
+    """
+    print("\n[13] 候选池要标出回避方向")
+
+    async def main():
+        db, store, bank = await _tagged_fixture()
+        subs = await store.list_submissions("u1", limit=10000)
+        # 区间要罩得住 trees（2400）—— 罩不住的话候选池会退回 math，
+        # 那就测不到标记了。
+        cands = summ.pick_candidates(subs, bank, want_tags=["trees"], limit=6,
+                                     min_difficulty=2000, max_difficulty=2800)
+        s = await summ.build(store, "u1", bank=bank, candidates=cands)
+        text = s.to_text()
+        check("候选池挑出了题", bool(cands), "")
+        check("挑的确实都是 trees 方向",
+              all("trees" in (c.get("tags") or []) for c in cands), "")
+        check("★ 正文里出现「← 回避方向：」标记", "← 回避方向：" in text, "")
+        check("★ 并提醒最多挑一道", "最多挑一道" in text, "")
+        await db.close()
+
+    asyncio.run(main())
+
+
 def main() -> int:
     print("=" * 62)
     print("core/summary.py 自测")
@@ -434,6 +600,10 @@ def main() -> int:
     test_no_cross_source()
     test_avoidance()
     test_avoidance_weight()
+    test_band_by_source()
+    test_luogu_bands_in_text()
+    test_tagged_denominator()
+    test_candidate_avoid_marker()
     test_empty_data()
     test_candidates()
     test_missing_bank()

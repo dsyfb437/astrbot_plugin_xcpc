@@ -346,6 +346,121 @@ def test_empty_uid():
     asyncio.run(main())
 
 
+class RecordingDB:
+    """把 `query` 的 SQL 记下来，其余全部转发给真库。"""
+
+    def __init__(self, db):
+        self._db = db
+        self.sqls = []
+
+    async def query(self, sql, params=()):
+        self.sqls.append((sql, params))
+        return await self._db.query(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+def test_load_bank_not_truncated():
+    """★ 题库读取不能被 LIMIT 悄悄截断。
+
+    真机翻车：`_load_bank` 默认 `limit_per_platform=4000`，而题库有
+    **11425 道** CF 题 —— 而且 SQL 不带 `ORDER BY`，等于**任意切了 4000 道**。
+
+    后果不是"少一点数据"，而是两份数据对不上：他 AC 的 90 道 CF 题里
+    只有 **6 道**能在题库里找到标签 → 「疑似难度回避」是在 **6 道题**上
+    算出来的 → `dp 做过 2 题 → share = 2/6 = 33%`，**高于 4% 的阈值，
+    直接判定为"不算回避"**。用户问「dp 的权重是不是该大一点」，
+    而 dp 那条**根本没能进列表**。
+    """
+    print("\n[9] 题库读取不能被 LIMIT 截断")
+
+    async def main():
+        db, store = await setup(with_bank=True)
+        rec = RecordingDB(db)
+        lp = loopm.Loop(rec, store)
+
+        rec.sqls.clear()
+        bank = await lp._load_bank()
+        sqls = [s for s, _ in rec.sqls]
+        check("默认调用（不传 limit）的 SQL 里没有 LIMIT",
+              bool(sqls) and all("LIMIT" not in s.upper() for s in sqls),
+              repr(sqls))
+
+        row = await db.query_one(
+            "SELECT COUNT(*) AS n FROM problems WHERE platform='codeforces'")
+        n_db = int(row["n"]) if row is not None else 0
+        check("这个测试有意义（题库不止几十道题）", n_db > 100, str(n_db))
+        check("★ 读回来的题数 == 库里的题数（一道不少）",
+              len(bank.get("codeforces") or {}) == n_db,
+              "bank %d vs db %d" % (len(bank.get("codeforces") or {}), n_db))
+
+        rec.sqls.clear()
+        small = await lp._load_bank(5)
+        sqls2 = [s for s, _ in rec.sqls]
+        check("显式传 limit 时 SQL 里带 LIMIT",
+              bool(sqls2) and all("LIMIT" in s.upper() for s in sqls2),
+              repr(sqls2))
+        check("显式 limit 真的生效（不是被忽略）",
+              len(small.get("codeforces") or {}) == 5,
+              str(len(small.get("codeforces") or {})))
+        await db.close()
+
+    asyncio.run(main())
+
+
+def test_avoid_candidates_interleaved():
+    """★ 回避方向的候选要**轮流交错**，不能一个方向刷满前排。
+
+    真机翻车：`want = [前两个回避方向]` 之后**一次性**调 `pick_candidates`，
+    标签命中多的排前面 → 前 12 条**全是树题** → 模型一口气排了三道树，
+    而提示词里明明写着「一道就够」。
+    **候选池的排列顺序本身就是给模型的暗示**，它比提示词里多写一句管用。
+    """
+    print("\n[10] 回避方向的候选要交错")
+
+    async def main():
+        db, store = await setup(with_bank=False)
+        probs = []
+        for i in range(200):
+            probs.append(Problem("codeforces", "CF:MA%d" % i, "ma%d" % i,
+                                 tags=["math"], difficulty=1400,
+                                 difficulty_source="cf_rating"))
+        # 两个"难且没碰过"的方向，难度都落在放宽后的区间里
+        for i in range(60):
+            probs.append(Problem("codeforces", "CF:TR%d" % i, "tr%d" % i,
+                                 tags=["trees"], difficulty=2200,
+                                 difficulty_source="cf_rating"))
+        for i in range(60):
+            probs.append(Problem("codeforces", "CF:GR%d" % i, "gr%d" % i,
+                                 tags=["graphs"], difficulty=2100,
+                                 difficulty_source="cf_rating"))
+        await store.upsert_problems("codeforces", probs)
+        await store.upsert_submissions(
+            "u1", "codeforces",
+            [sub(i, "CF:MA%d" % i, diff=1400) for i in range(30)])
+
+        lp = loopm.Loop(db, store)
+        prep = await lp.prepare("u1", auto_sync=False)
+        order = [a["tag"] for a in prep["summary"].avoided]
+        check("至少认出两个回避方向", len(order) >= 2, repr(order))
+        check("★ 前两个正好是 trees / graphs",
+              order[:2] == ["trees", "graphs"], repr(order))
+
+        cands = prep["candidates"]
+        check("候选池有货", len(cands) >= 4, str(len(cands)))
+        head = [set(c.get("tags") or []) & {"trees", "graphs"} for c in cands[:6]]
+        check("★ 前几条里两个方向都出现了",
+              any("trees" in t for t in head) and any("graphs" in t for t in head),
+              repr([sorted(t) for t in head]))
+        check("★ 相邻两条不是同一个方向（trees, graphs, trees, graphs…）",
+              all(head[i] != head[i + 1] for i in range(len(head) - 1)),
+              repr([sorted(t) for t in head]))
+        await db.close()
+
+    asyncio.run(main())
+
+
 def main() -> int:
     print("=" * 62)
     print("core/loop.py 自测（假 provider）")
@@ -355,6 +470,8 @@ def main() -> int:
     test_bad_output()
     test_target_band()
     test_avoidance_injection()
+    test_load_bank_not_truncated()
+    test_avoid_candidates_interleaved()
     test_feedback()
     test_empty_uid()
     print("\n" + "=" * 62)
