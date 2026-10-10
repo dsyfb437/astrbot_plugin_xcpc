@@ -42,7 +42,7 @@ from typing import Any, Iterable
 
 # 用 PRAGMA user_version 做迁移版本号。
 # 加新表/加列时：**不要改老语句**，在后面追加一条 _MIGRATIONS 项。
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _TABLES_V1 = """
 -- 用户与账号绑定。
@@ -286,6 +286,41 @@ _MIGRATIONS: list[tuple[int, list[str]]] = [
             note        TEXT                -- 为什么选它（给用户看的理由）
         )""",
         """CREATE INDEX IF NOT EXISTS idx_blocks_topic ON blocks(topic)""",
+    ]),
+
+    # ---------------- v7：VP 场次候选（v0.6.1） ----------------
+    #
+    # v0.6.0 的 prompt 里 VP 那条规则只能写泛指，因为库里 `contests`
+    # 表**只存已经参加过的比赛** —— 没有任何"还没打但可以打"的候选。
+    # 模型没有这个数据，写具体场次就一定是编的。
+    #
+    # 数据源是两个公开接口（都不用登录）：
+    #   · CF      `contest.list?gym=false`（410KB / 2155 场）
+    #   · AtCoder `kenkoooo.com/atcoder/resources/contests.json`（1.0MB）
+    #
+    # ★ 两张表而不是一张：**元数据和数据分开**。
+    # `vp_cache` 那一行记的是"上一次**尝试**抓取的结果"——
+    # 包括失败。只在成功时记时间的话，抓一次失败就会让之后每一次
+    # 调用都重试，把一个"偶尔慢"变成"每次都慢三秒"。
+    (7, [
+        """CREATE TABLE IF NOT EXISTS vp_contests (
+            platform     TEXT NOT NULL,     -- codeforces / atcoder
+            contest_id   TEXT NOT NULL,
+            name         TEXT,
+            division     TEXT,              -- Div. 2 / Educational / ABC …
+            start_epoch  INTEGER,
+            duration_sec INTEGER,
+            PRIMARY KEY (platform, contest_id)
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_vp_start
+               ON vp_contests(platform, start_epoch)""",
+        """CREATE TABLE IF NOT EXISTS vp_cache (
+            platform   TEXT PRIMARY KEY,
+            fetched_at INTEGER NOT NULL,    -- **尝试**时间，不是成功时间
+            ok         INTEGER NOT NULL,
+            detail     TEXT,
+            rating     INTEGER              -- 抓列表时顺手抓的他的 rating
+        )""",
     ]),
 ]
 

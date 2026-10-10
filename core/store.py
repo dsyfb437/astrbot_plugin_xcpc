@@ -764,6 +764,94 @@ class Store:
         await self.db.execute("DELETE FROM blocks WHERE user_id=?", (user_id,))
 
     # ==================================================================
+    # VP 场次候选（v0.6.1）
+    # ==================================================================
+    #: 认得这两个平台的比赛列表。`core/vp.py` 里也有同名常量 ——
+    #: 这里再写一遍是为了**不带循环依赖**地校验参数。
+    _VP_PLATFORMS = ("codeforces", "atcoder")
+
+    def _check_vp_platform(self, platform: str) -> str:
+        p = (platform or "").strip().lower()
+        if p not in self._VP_PLATFORMS:
+            raise ValueError("VP 只支持 %s，收到 %r"
+                             % ("/".join(self._VP_PLATFORMS), platform))
+        return p
+
+    async def vp_state(self, platform: str) -> dict:
+        """上一次**尝试**抓取比赛列表的结果。没抓过返回 `{}`。
+
+        ⚠️ `fetched_at` 是**尝试**时间，成功失败都更新 ——
+        只在成功时更新的话，抓一次失败就会让之后每一次调用都重试。
+        """
+        p = self._check_vp_platform(platform)
+        row = await self.db.query_one(
+            "SELECT * FROM vp_cache WHERE platform=?", (p,))
+        if not row:
+            return {}
+        return {
+            "platform": p,
+            "fetched_at": int(row["fetched_at"] or 0),
+            "ok": bool(row["ok"]),
+            "detail": row["detail"] or "",
+            "rating": int(row["rating"] or 0),
+        }
+
+    async def save_vp(self, platform: str, items, *, ok: bool = True,
+                      detail: str = "", rating: int | None = None) -> int:
+        """整批替换某个平台的候选，并记下这次尝试的结果。返回写入条数。
+
+        **整批替换而不是 upsert** —— 列表是外部给的快照，删掉的场次
+        就该消失。留着的话会推荐一场已经被 CF 下架的比赛。
+        """
+        p = self._check_vp_platform(platform)
+        rows = []
+        for it in items or []:
+            cid = str((it or {}).get("contest_id") or "").strip()
+            if not cid:
+                continue
+            rows.append((
+                p, cid,
+                str(it.get("name") or ""),
+                str(it.get("division") or ""),
+                int(it.get("start_epoch") or 0),
+                int(it.get("duration_sec") or 0),
+            ))
+        await self.db.execute("DELETE FROM vp_contests WHERE platform=?", (p,))
+        if rows:
+            # ★ 是 `executemany`，不是 `execute_many`（写错在真机上
+            # 一存就 AttributeError，而当时还没有测试覆盖到这一行）
+            await self.db.executemany(
+                "INSERT OR REPLACE INTO vp_contests "
+                "(platform, contest_id, name, division, start_epoch, duration_sec) "
+                "VALUES (?, ?, ?, ?, ?, ?)", rows)
+        old = await self.db.query_one(
+            "SELECT rating FROM vp_cache WHERE platform=?", (p,))
+        keep_rating = int((old or {})["rating"] or 0) if old else 0
+        if rating is None:
+            rating = keep_rating
+        await self.db.execute(
+            "INSERT INTO vp_cache (platform, fetched_at, ok, detail, rating) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(platform) DO UPDATE SET "
+            "fetched_at=excluded.fetched_at, ok=excluded.ok, "
+            "detail=excluded.detail, rating=excluded.rating",
+            # ★ 是模块级的 `_epoch()`，不是 `self._epoch()`
+            (p, _epoch(), 1 if ok else 0, str(detail or "")[:300],
+             int(rating or 0)))
+        return len(rows)
+
+    async def list_vp(self, platform: str, limit: int = 0) -> list:
+        """某个平台的候选，**新的在前**。"""
+        p = self._check_vp_platform(platform)
+        sql = ("SELECT * FROM vp_contests WHERE platform=? "
+               "ORDER BY start_epoch DESC")
+        params: tuple = (p,)
+        if int(limit) > 0:
+            sql += " LIMIT ?"
+            params = (p, int(limit))
+        return await self.db.query(sql, params)
+
+    # ==================================================================
     # 方案与反馈
     # ==================================================================
     async def save_plan(self, user_id: str, date: str, payload: Any) -> int:
@@ -814,3 +902,14 @@ class Store:
 def _default_now() -> str:
     from . import log as logm
     return logm.stamp()
+
+
+def _epoch() -> int:
+    """当前时间戳（秒）。
+
+    `_default_now()` 给的是**给人看的字符串**（本地时区），而
+    `vp_cache.fetched_at` 要拿来做减法算 TTL —— 字符串没法减。
+    两个都要，所以两个都有。
+    """
+    import time
+    return int(time.time())

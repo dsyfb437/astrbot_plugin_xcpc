@@ -720,6 +720,50 @@ def test_tag_alias():
     asyncio.run(main())
 
 
+def test_vp_section():
+    print("\n[13] 「可以 VP 的场次」这一段（v0.6.1）")
+
+    async def main():
+        db, store = await fresh()
+        await store.ensure_user("u1")
+
+        # 没有候选时：整段都不该出现（不能留一个空标题在那）
+        s = await summ.build(store, "u1")
+        text = s.to_text()
+        check("没有候选时不出这一段",
+              "可以 VP 的场次" not in text, text[:300])
+        check("没有候选时 vp_candidates 是空表", s.vp_candidates == [],
+              repr(s.vp_candidates))
+
+        items = [
+            {"platform": "codeforces", "contest_id": "1123",
+             "name": "Codeforces Round 1123 (Div. 2)", "division": "Div. 2",
+             "start_epoch": 1700000000, "duration_sec": 8100},
+            {"platform": "atcoder", "contest_id": "abc470",
+             "name": "AtCoder Beginner Contest 470", "division": "ABC",
+             "start_epoch": 1700000000, "duration_sec": 6000},
+        ]
+        s = await summ.build(store, "u1", vp_candidates=items)
+        text = s.to_text()
+        check("★ 有候选时出现这一段", "可以 VP 的场次" in text, text[:400])
+        check("场次名在", "Codeforces Round 1123 (Div. 2)" in text, "")
+        check("★ 两场的时长各按自己的算（135 和 100）",
+              "135" in text and "100" in text, "")
+        check("★ 链接在（点得进去才打得成）",
+              "codeforces.com/contest/1123" in text, "")
+        check("★ 明说「不要写上面没有的场次」",
+              "绝对不要写上面没有的场次" in text, "")
+        check("★ 说了 VP 和专题不能互替",
+              "两者不能互替" in text, "")
+        check("★ 位置：在「## 总量」之前",
+              text.index("可以 VP 的场次") < text.index("## 总量"), "")
+        check("vp_candidates 字段存下来了", len(s.vp_candidates) == 2,
+              repr(len(s.vp_candidates)))
+        await db.close()
+
+    asyncio.run(main())
+
+
 def main() -> int:
     print("=" * 62)
     print("core/summary.py 自测")
@@ -738,6 +782,7 @@ def main() -> int:
     test_missing_bank()
     test_text_length()
     test_execution()
+    test_vp_section()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

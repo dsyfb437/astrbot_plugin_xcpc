@@ -408,6 +408,8 @@ class Summary:
     # 训练块（v0.6.0）：一段连续的日子里只吃一个子专题
     block: dict = field(default_factory=dict)
     block_progress: dict = field(default_factory=dict)
+    # VP 场次候选（v0.6.1）：他还没打过、也没被剧透的比赛
+    vp_candidates: list[dict] = field(default_factory=list)
     # 供 LLM 挑题的候选（已去重、排好序）
     candidates: list[dict] = field(default_factory=list)
 
@@ -438,6 +440,19 @@ class Summary:
                          "（VP 或者连续几道同方向的题），顺带提醒他 `/xcpc 块 下一个`。"
                          % (self.block_progress.get("done", 0),
                             self.block_progress.get("target", 0)))
+            L.append("")
+
+        if self.vp_candidates:
+            from . import vp as vpmod
+            L.append("## 🎮 可以 VP 的场次（**他还没打过、也没被剧透的**）")
+            L.append(vpmod.describe(self.vp_candidates))
+            L.append("")
+            L.append("  VP 是**拉量**的手段，专题是**补短**的手段，**两者不能互替** ——"
+                     "VP 练的是「在时限内把会做的做出来」，专题练的是「把不会的变成会的」。")
+            L.append("  排 VP 时从上面挑一场：`kind=\"vp\"`、`problem` 留空、"
+                     "`minutes` **用它自己的时长**（上一行写了是多少分钟）。")
+            L.append("  ★ **绝对不要写上面没有的场次** —— 编出来的场次编号一定是错的。"
+                     "上面这些已经替你减掉了参加过的、以及他已经做过两道以上的。")
             L.append("")
 
         L.append("## 总量")
@@ -620,7 +635,8 @@ async def build(store, user_id: str, *, platform_names: dict | None = None,
                 bank: dict | None = None, contest_days: int | None = None,
                 contest_name: str = "", candidates: list | None = None,
                 block: dict | None = None,
-                block_progress: dict | None = None) -> Summary:
+                block_progress: dict | None = None,
+                vp_candidates: list | None = None) -> Summary:
     """从 store 读数据并汇总。
 
     `bank` 是题库标注（`{platform: {problem_key: {tags, difficulty, ...}}}`），
@@ -634,6 +650,7 @@ async def build(store, user_id: str, *, platform_names: dict | None = None,
         "codeforces": "CF", "atcoder": "AtCoder", "qoj": "QOJ", "luogu": "洛谷"}
     s = Summary(user_id=user_id, generated_at=logm.stamp(),
                 block=block or {}, block_progress=block_progress or {},
+                vp_candidates=list(vp_candidates or []),
                 days_to_contest=contest_days, contest_name=contest_name)
 
     subs = await store.list_submissions(user_id, limit=100000)

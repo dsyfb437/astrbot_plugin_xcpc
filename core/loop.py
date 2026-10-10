@@ -34,6 +34,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from . import blocks as blocksm
+from . import vp as vpmod
 from . import curriculum as cur
 from . import llm as llmm
 from . import log as logm
@@ -219,10 +220,34 @@ class Loop:
             candidates.append(c)
         candidates = candidates[:42]
 
+        # ---- VP 场次（v0.6.1）----------------------------------------
+        #
+        # v0.6.0 里模型只能写「打一场 CF Div.2 的 VP」这种泛指，并且被
+        # 明令禁止写具体场次 —— 因为库里 `contests` 只存**参加过的**，
+        # 没有任何"还没打但可以打"的候选，写具体场次就一定是编的。
+        #
+        # 现在把 CF 的 `contest.list` 和 AtCoder 的 kenkoooo 列表缓存进库，
+        # 减掉参加过的和已被剧透的，给模型一份真实可选的场次。
+        #
+        # ★ **整段包在 try 里，失败绝不能让方案失败** —— VP 是锦上添花。
+        # 缓存 24 小时，所以绝大多数调用只是两次 SQL。
+        vp_cands: list = []
+        try:
+            handles = await self.store.handles(user_id)
+            await vpmod.ensure(self.store, handles=handles,
+                               recorder=self.recorder)
+            vp_cands = await vpmod.candidates(self.store, user_id, limit=8)
+        except Exception as exc:                            # noqa: BLE001
+            if self.recorder:
+                self.recorder.event("loop.vp_fail", user_id=user_id, ok=False,
+                                    error_kind="内部错误", detail=str(exc))
+            vp_cands = []
+
         info = await summ.build(self.store, user_id, bank=bank,
                                 candidates=candidates,
                                 block=blk,
-                                block_progress=prog)
+                                block_progress=prog,
+                                vp_candidates=vp_cands)
         if topic is not None:
             info.notes.append(
                 "候选池前 %d 条是**当前训练块**「%s」的题（难度带 %s，"
@@ -230,6 +255,16 @@ class Loop:
                 "**优先从前面的里挑**。" % (len(topic_cands), topic.name,
                                         cur.band_for(topic, "codeforces"),
                                         len(normal_cands)))
+        if vp_cands:
+            info.notes.append(
+                "「可以 VP 的场次」有 %d 场，是**真实存在**的比赛 ——"
+                "已经减掉了他参加过的、以及他已经做过两道以上的。"
+                "排 VP 就从那里挑，别写别处的场次。" % len(vp_cands))
+        elif topic is not None:
+            info.notes.append(
+                "这次**没有**可用的 VP 场次数据（比赛列表没抓到，或者全被"
+                "排除完了）—— 所以 VP 那条任务只写泛指（「打一场 CF Div.2 "
+                "的 VP」），**不要编具体场次**。")
         if median is not None:
             info.notes.append(
                 "兜底候选的难度区间是 %s~%s，依据是你做过的题的中位难度（%s）。"

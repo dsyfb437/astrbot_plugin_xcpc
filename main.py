@@ -104,6 +104,7 @@ def _adopt_bundled_data(old: str, new: str) -> tuple[str, str]:
 try:
     from .core import accounts as accm
     from .core import blocks as blocksm
+    from .core import vp as vpmod
     from .core import curriculum as cur
     from .core import db as dbm
     from .core import llm as llmm
@@ -114,7 +115,8 @@ try:
     from .core import sync as syncm
 except ImportError:                       # 作为顶层模块导入（自测 / 手工调试）
     from core import accounts as accm     # type: ignore[no-redef]
-    from core import blocks as blocksm    # type: ignore[no-redef]
+    from core import blocks as blocksm
+    from core import vp as vpmod    # type: ignore[no-redef]    # type: ignore[no-redef]
     from core import curriculum as cur    # type: ignore[no-redef]
     from core import db as dbm            # type: ignore[no-redef]
     from core import llm as llmm          # type: ignore[no-redef]
@@ -244,6 +246,7 @@ HELP_MAIN = f"""XCPC 备赛助手 —— QQ 里的训练教练
   {CMD}             今天的方案      ← 记不住别的就发这个
   {CMD} 打卡        今天做完了（也可以发 {CMD} 做了一半 / {CMD} 没做）
   {CMD} 块          看当前训练专题，或者换一个
+  {CMD} vp          看能打哪几场 VP（真实场次，已经减掉你打过的）
   {CMD} 绑定        关联 Codeforces / AtCoder / 洛谷 / QOJ
   {CMD} 同步        立刻拉一次做题记录
   {CMD} 自检        哪儿不对、下一步该发哪条
@@ -280,6 +283,11 @@ HELP_MORE = f"""XCPC 备赛助手（完整指令表）
 【练什么】这是核心
   {CMD} 方案             跑一轮：汇总数据 → 问模型 → 给你下一步
                          可以带要求：{CMD} 方案 这周别安排 VP
+  {CMD} 块 [下一个|专题名|关]
+                         当前训练专题 + 完整阶梯（dp 9 个 + 图论 10 个）。
+                         一段连续日子只吃一个，不每天换方向
+  {CMD} vp [刷新]        能打哪几场 VP —— 真实场次，已经减掉你打过的、
+                         以及同一场里已经做过两道以上的
   {CMD} 打卡 [一句话]    今天做完了     ← 循环靠它闭环
   {CMD} 做了一半         只做了一部分
   {CMD} 没做 [原因]      今天没做
@@ -2422,6 +2430,72 @@ class XcpcPlugin(Star):
             body.append("")
             body.append("发一个 %s 就会自动开一个 —— 不用手动设。" % CMD)
         yield event.plain_result("\n".join(body))
+
+    @xcpc.command("vp", alias={"VP", "模拟赛", "加一场"})
+    async def cmd_vp(self, event: AstrMessageEvent):
+        """看/刷新可以打的 VP 场次。用法：/xcpc vp [刷新]
+
+        v0.6.1 加的。**它解决的问题是「模型不能编比赛编号」** ——
+        v0.6.0 的 prompt 里 VP 那条只能写泛指，因为库里 `contests`
+        只存参加过的比赛，没有任何"还没打但可以打"的候选。
+
+        现在这份列表是真实数据（CF `contest.list` + AtCoder kenkoooo），
+        而且已经减掉了三件事：
+          · 他参加过的场次（参加过的不能当 VP）
+          · 他已经做过两道以上的场次（那种 VP 是自欺欺人）
+          · 以他的 rating 打不动的赛制（Div.1 / AGC）
+
+        `刷新` 强制重抓（缓存 24 小时，正常不用手动刷）。
+        """
+        store, err = self._store_or_error()
+        if err:
+            yield event.plain_result(err)
+            return
+        if not self._sender_allowed(event):
+            yield event.plain_result("没有权限。")
+            return
+        uid = self._uid(event)
+        arg = _cmd_text(event)
+        arg = re.sub(r"^\s*(?:vp|VP|模拟赛|加一场)\s*", "", arg, flags=re.I).strip()
+        force = arg.lower() in ("刷新", "refresh", "更新", "重抓")
+
+        yield event.plain_result(
+            "正在拉比赛列表…（第一次会慢几秒，之后缓存 24 小时）"
+            if force else "看一眼可以打的 VP…")
+        try:
+            handles = await store.handles(uid)
+            state = await vpmod.ensure(store, handles=handles, force=force,
+                                       recorder=self.log)
+            items = await vpmod.candidates(store, uid, limit=8)
+        except Exception as exc:                            # noqa: BLE001
+            yield event.plain_result("拉比赛列表失败：%s: %s"
+                                     % (type(exc).__name__, exc))
+            return
+
+        # 抓取失败要说清楚是哪一边失败了 —— 只说"没有场次"会让人
+        # 以为是"确实没得打"，那是两种完全不同的状态。
+        bad = [(p, st.get("detail") or "未知原因")
+               for p, st in sorted((state or {}).items()) if not st.get("ok")]
+        if not items:
+            body = ["现在没挑出可以打的场次。"]
+            if bad:
+                body.append("")
+                for p, why in bad:
+                    body.append("· %s：%s" % (p, why))
+            else:
+                body.append("")
+                body.append("可能全都打过了，或者都被剧透（同一场里已经做过 2 道以上）。")
+            body.append("过一天再试，或者发 %s vp 刷新。" % CMD)
+            yield event.plain_result("\n".join(body))
+            return
+
+        lines = ["可以打的 VP 场次（已经减掉你打过的、以及做过的）：", ""]
+        lines.append(vpmod.describe(items))
+        lines.append("")
+        if bad:
+            lines.append("⚠️ " + "；".join("%s：%s" % (p, w) for p, w in bad))
+        lines.append("挑一场打：%s vp 刷新 可以重拉一遍。" % CMD)
+        yield event.plain_result("\n".join(lines))
 
     async def _log_task(self, event: AstrMessageEvent, status: str, cmd: str):
         store, err = self._store_or_error()

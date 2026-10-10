@@ -1219,6 +1219,97 @@ def test_block_cmd():
     asyncio.run(main_())
 
 
+def test_vp_cmd():
+    print("\n[12] /xcpc vp（v0.6.1 的 VP 场次源）")
+
+    async def main_():
+        tmp = tempfile.mkdtemp(prefix="xcpc_vpcmd_")
+        p, mod = await make_plugin(tmp)
+        from core import vp as vpmod
+
+        # ---- 抓取失败：**必须说清是哪一边失败了**。
+        # 只说「没有场次」会让人以为是「确实没得打」，那是两种
+        # 完全不同的状态 —— 一个是网络问题，一个是真没得打。
+        orig = vpmod._get_json
+
+        async def dead(client, url):
+            return None, "模拟的网络故障"
+        vpmod._get_json = dead
+        try:
+            ev = await drive(p, "cmd_vp", "/xcpc vp 刷新")
+        finally:
+            vpmod._get_json = orig
+        check("抓取失败时有输出", bool(ev.text), ev.text[:150])
+        check("★ 说清了是哪个平台失败",
+              "codeforces" in ev.text and "atcoder" in ev.text, ev.text[:300])
+        check("★ 说清了失败原因", "模拟的网络故障" in ev.text, ev.text[:300])
+        check("★ 没把抓取失败说成「确实没得打」",
+              "全都打过" not in ev.text, ev.text[:300])
+
+        # ---- 有数据时列出来。save_vp 刚写过，fetched_at 是新的，
+        #      ensure 会直接用缓存，不会再打网络。
+        vpmod._get_json = dead
+        try:
+            await p.store.save_vp("codeforces", [
+                {"contest_id": "1123",
+                 "name": "Codeforces Round 1123 (Div. 2)",
+                 "division": "Div. 2", "start_epoch": 1700000000,
+                 "duration_sec": 8100},
+                {"contest_id": "1125",
+                 "name": "Codeforces Round 1125 (Div. 3)",
+                 "division": "Div. 3", "start_epoch": 1699000000,
+                 "duration_sec": 7200},
+            ], ok=True, rating=1713)
+            ev = await drive(p, "cmd_vp", "/xcpc vp")
+        finally:
+            vpmod._get_json = orig
+        check("有场次时列出来了", "Codeforces Round 1123" in ev.text, ev.text[:400])
+        check("★ 带了赛制", "Div. 2" in ev.text, ev.text[:400])
+        check("★ 带了链接（点得进去才能打）",
+              "codeforces.com/contest/1123" in ev.text, ev.text[:400])
+        check("★ 时长按这一场自己的算", "135" in ev.text, ev.text[:400])
+        check("★ 提醒了可以刷新", "刷新" in ev.text, ev.text[:400])
+
+        # ---- 「做过的」要被减掉（同一场里已经 AC 两道 = 剧透）
+        from platforms.base import Submission
+        await p.store.upsert_submissions("qq1001", "codeforces", [
+            Submission(platform="codeforces", submission_id="z1",
+                       problem_key="CF:1123A", verdict="OK", epoch=1000),
+            Submission(platform="codeforces", submission_id="z2",
+                       problem_key="CF:1123B", verdict="OK", epoch=1001),
+        ])
+        await p.store.save_vp("codeforces", [
+            {"contest_id": "1123", "name": "Codeforces Round 1123 (Div. 2)",
+             "division": "Div. 2", "start_epoch": 1700000000,
+             "duration_sec": 8100},
+            {"contest_id": "1125", "name": "Codeforces Round 1125 (Div. 3)",
+             "division": "Div. 3", "start_epoch": 1699000000,
+             "duration_sec": 7200},
+        ], ok=True, rating=1713)
+        ev = await drive(p, "cmd_vp", "/xcpc vp")
+        check("★ 已经做过两道的 1123 被拿掉了",
+              "Round 1123" not in ev.text, ev.text[:400])
+        check("没做过的 1125 还在", "Round 1125" in ev.text, ev.text[:400])
+
+        # ---- 权限
+        p.config["allow_senders"] = ["qq1001"]
+        ev = await drive(p, "cmd_vp", "/xcpc vp", sender="qq9999")
+        check("★ 白名单外的人拒绝", "没有权限" in ev.text, ev.text[:150])
+        p.config["allow_senders"] = []
+
+        # ---- 帮助里要提得到（否则等于没这个功能）
+        check("★ 帮助里有 vp 这一条", "vp" in mod.HELP_MAIN.lower(),
+              mod.HELP_MAIN[:400])
+        # ★ 完整指令表是「老的 HELP_MAIN 原样搬过来」，新加的命令容易
+        #   只加在主帮助里、忘了同步到「更多」那一份
+        check("★ 完整指令表里也有 vp", "vp" in mod.HELP_MORE.lower(),
+              mod.HELP_MORE[:200])
+        check("★ 完整指令表里也有「块」", "块" in mod.HELP_MORE,
+              mod.HELP_MORE[:200])
+
+    asyncio.run(main_())
+
+
 def main() -> int:
     print("=" * 62)
     print("命令接线测试（astrbot 外壳，不联网）")
@@ -1233,6 +1324,7 @@ def main() -> int:
     test_sync_log_report()
     test_push_train()
     test_block_cmd()
+    test_vp_cmd()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)
