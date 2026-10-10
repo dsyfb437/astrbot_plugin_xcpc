@@ -623,6 +623,79 @@ def test_activity():
     asyncio.run(main())
 
 
+def test_block_crud():
+    print("\n[10] 训练块的存取（v0.6.0）")
+
+    async def main():
+        db, s = new_store()
+        await db.open()
+
+        check("没有块时返回 None", await s.get_block("u1") is None, "")
+
+        await s.set_block("u1", "dp", "dp_tree", target=20,
+                          band_lo=1400, band_hi=1800, note="树形 DP 是绕不过去的")
+        blk = await s.get_block("u1")
+        check("写进去了", blk is not None and blk["topic"] == "dp_tree",
+              repr(dict(blk) if blk else None))
+        check("难度带存下来了",
+              (blk["band_lo"], blk["band_hi"]) == (1400, 1800),
+              repr((blk["band_lo"], blk["band_hi"])))
+        check("target 存下来了", blk["target"] == 20, repr(blk["target"]))
+        check("note 存下来了", "绕不过去" in (blk["note"] or ""), repr(blk["note"]))
+        check("★ started_at 自动填了", bool(blk["started_at"]), repr(blk["started_at"]))
+
+        # ★ 一个用户同时只有一个块 —— 再设就是覆盖，不是新增
+        first_start = blk["started_at"]
+        await s.set_block("u1", "dp", "dp_tree", target=20,
+                          band_lo=1400, band_hi=1800, note="改主意了")
+        blk2 = await s.get_block("u1")
+        check("★ 同一个用户只有一个块（覆盖不是新增）", blk2 is not None, "")
+        check("note 被更新", "改主意" in (blk2["note"] or ""), repr(blk2["note"]))
+        check("★ 重复设同一个子专题**不重置 started_at**（否则进度永远停在 0）",
+              blk2["started_at"] == first_start,
+              "%s -> %s" % (first_start, blk2["started_at"]))
+
+        # 换子专题才重新起算
+        await s.set_block("u1", "dp", "dp_interval", target=15,
+                          band_lo=1400, band_hi=1800, note="")
+        blk3 = await s.get_block("u1")
+        check("换了子专题", blk3["topic"] == "dp_interval", repr(blk3["topic"]))
+        check("★ 换子专题才重新起算 started_at",
+              blk3["started_at"] >= first_start, repr(blk3["started_at"]))
+
+        # 隔离
+        check("别的用户看不到", await s.get_block("u2") is None, "")
+        await s.set_block("u2", "graph", "g_flow", target=12,
+                          band_lo=1800, band_hi=2200, note="")
+        check("★ 用户之间不串", (await s.get_block("u1"))["topic"] == "dp_interval"
+              and (await s.get_block("u2"))["topic"] == "g_flow", "")
+
+        # 清空
+        await s.clear_block("u1")
+        check("清掉了", await s.get_block("u1") is None, "")
+        check("别人的没被清掉", (await s.get_block("u2"))["topic"] == "g_flow", "")
+        check("重复清空不炸", await s.clear_block("u1") is None, "")
+
+        # 空 user_id 不该写进去
+        for uid in ("", None):
+            try:
+                await s.set_block(uid, "dp", "dp_tree")
+                check("空 user_id 被拒绝（%r）" % uid, False, "没有报错")
+            except Exception:
+                check("空 user_id 被拒绝（%r）" % uid, True, "")
+
+        check("note 会被截断（不留一整段进库）",
+              True, "")
+        await s.set_block("u2", "graph", "g_flow", note="字" * 500)
+        b = await s.get_block("u2")
+        check("★ note 截到 300 字以内", len(b["note"] or "") <= 300,
+              "%d 字" % len(b["note"] or ""))
+
+        await db.close()
+
+    asyncio.run(main())
+
+
 def main() -> int:
     print("=" * 62)
     print("core/store.py 自测")
@@ -636,6 +709,7 @@ def main() -> int:
     test_dashboard_link()
     test_task_log()
     test_activity()
+    test_block_crud()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

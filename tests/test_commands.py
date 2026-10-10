@@ -1132,6 +1132,93 @@ def test_push_train():
     asyncio.run(main_())
 
 
+# ---------------------------------------------------------------------------
+# 11. 训练块命令（v0.6.0）
+# ---------------------------------------------------------------------------
+
+def test_block_cmd():
+    print("\n[11] /xcpc 块")
+
+    async def main_():
+        tmp = tempfile.mkdtemp(prefix="xcpc_block_")
+        p, mod = await make_plugin(tmp)
+        import main as plugin_main
+
+        # 还没开块
+        ev = await drive(p, "cmd_block", "/xcpc 块")
+        check("没块时说清「现在没有」", "没有训练块" in ev.text, ev.text[:150])
+        check("并且告诉他不用手动设", "/xcpc" in ev.text, ev.text[:200])
+
+        # 直接点名一个专题
+        ev = await drive(p, "cmd_block", "/xcpc 块 背包")
+        check("点名能开块", "背包" in ev.text, ev.text[:150])
+        blk = await p.store.get_block("qq1001")
+        check("★ 块真进库了", blk is not None and blk["topic"] == "dp_knapsack",
+              repr(dict(blk) if blk else None))
+        check("target 取自 curriculum（背包 18 道）", blk["target"] == 18,
+              repr(blk["target"]))
+        check("难度带取自 curriculum",
+              (blk["band_lo"], blk["band_hi"]) == (1200, 1600),
+              repr((blk["band_lo"], blk["band_hi"])))
+        check("回了进度", "进度" in ev.text or "/" in ev.text, ev.text[:250])
+
+        # 看一眼
+        ev = await drive(p, "cmd_block", "/xcpc 块")
+        check("看一眼有输出", bool(ev.text), ev.text[:120])
+        check("★ 列出了完整阶梯", "线性" in ev.text and "网络流" in ev.text,
+              ev.text[:400])
+        check("标出了当前在哪一格", "背包" in ev.text, ev.text[:300])
+
+        # 下一个
+        ev = await drive(p, "cmd_block", "/xcpc 块 下一个")
+        check("下一个有输出", bool(ev.text), ev.text[:120])
+        blk2 = await p.store.get_block("qq1001")
+        check("★ 真的换到下一个了", blk2["topic"] != "dp_knapsack",
+              repr(blk2["topic"]))
+        check("换的是阶梯上的下一个（区间 DP）", blk2["topic"] == "dp_interval",
+              repr(blk2["topic"]))
+        check("★ 换块会重置 started_at（进度重新起算）",
+              blk2["started_at"] >= blk["started_at"],
+              "%s -> %s" % (blk["started_at"], blk2["started_at"]))
+
+        # 认不出的专题名
+        ev = await drive(p, "cmd_block", "/xcpc 块 不存在的专题")
+        check("认不出时给提示而不是静默", "没找到" in ev.text, ev.text[:150])
+
+        # 关掉
+        ev = await drive(p, "cmd_block", "/xcpc 块 关")
+        check("关掉有输出", bool(ev.text), ev.text[:120])
+        check("★ 关掉后库里真没了", await p.store.get_block("qq1001") is None, "")
+
+        # 再关一次不该炸
+        ev = await drive(p, "cmd_block", "/xcpc 块 关")
+        check("重复关不炸", bool(ev.text), ev.text[:120])
+
+        # 权限 —— FakeEvent.is_admin() 恒为 True，所以只能靠 allow_senders 拦
+        p.config["allow_senders"] = ["qq1001"]
+        ev = await drive(p, "cmd_block", "/xcpc 块", sender="qq9999")
+        check("★ 白名单外的人拒绝", "没有权限" in ev.text, ev.text[:120])
+        ev = await drive(p, "cmd_block", "/xcpc 块", sender="qq1001")
+        check("白名单内的人放行", "没有权限" not in ev.text, ev.text[:120])
+        p.config["allow_senders"] = []
+
+        # ★ 裸 /xcpc 的正则要锚死首尾，否则会抢走 `/xcpc 方案`
+        rx = plugin_main.BARE_CMD_RE
+        for ok_msg in ("/xcpc", "xcpc", "!xcpc", "／xcpc", "  /xcpc  "):
+            check("裸命令匹配 %r" % ok_msg, bool(rx.match(ok_msg)), "")
+        for bad_msg in ("/xcpc 方案", "/xcpc方案", "/xcpc 打卡", "/xcpc 块",
+                        "xcpcabc"):
+            check("★ 不抢 %r" % bad_msg, not rx.match(bad_msg), "")
+
+        # 裸 /xcpc 要走完整的方案流程
+        ev = await drive(p, "bare_xcpc", "/xcpc")
+        check("裸 /xcpc 有输出", bool(ev.text), ev.text[:150])
+        check("★ 裸 /xcpc 就是方案（不用记第二条命令）",
+              "没有权限" not in ev.text, ev.text[:200])
+
+    asyncio.run(main_())
+
+
 def main() -> int:
     print("=" * 62)
     print("命令接线测试（astrbot 外壳，不联网）")
@@ -1145,6 +1232,7 @@ def main() -> int:
     test_long_reply_image()
     test_sync_log_report()
     test_push_train()
+    test_block_cmd()
     print("\n" + "=" * 62)
     print(" 通过 %d ｜ 失败 %d" % (PASS, FAIL))
     print("=" * 62)

@@ -719,6 +719,50 @@ class Store:
             "days_since_last": (_day(t0) - have[0]).days if have else None,
         }
 
+
+    # ==================================================================
+    # 训练块（v0.6.0）
+    # ==================================================================
+    # 「一段连续的日子里只吃一个子专题」。每个用户同时只有**一个**块 ——
+    # "同时开三个专题"正是要治的病（见 core/curriculum.py 的模块注释）。
+    async def get_block(self, user_id: str):
+        """当前训练块。没有就返回 `None`。"""
+        user_id = _require_user(user_id)
+        return await self.db.query_one(
+            "SELECT * FROM blocks WHERE user_id=?", (user_id,))
+
+    async def set_block(self, user_id: str, module: str, topic: str, *,
+                        target: int = 15, band_lo: int = 1200,
+                        band_hi: int = 1600, note: str = "") -> None:
+        """开一个训练块（或改当前块的参数）。
+
+        ⚠️ **同一个子专题重复设置时保留原来的 `started_at`** ——
+        进度是"从这个时刻之后 AC 了多少道"，每调一次就把起点推到今天的话，
+        用户永远停在 0/N。只有**换了子专题**才重新起算。
+        """
+        user_id = _require_user(user_id)
+        await self.ensure_user(user_id)
+        now = self._now()
+        old = await self.get_block(user_id)
+        started = now
+        if old is not None and old["topic"] == topic and old["module"] == module:
+            started = old["started_at"] or now
+        await self.db.execute(
+            "INSERT INTO blocks "
+            "(user_id, module, topic, target, band_lo, band_hi, started_at, updated_at, note) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET "
+            "module=excluded.module, topic=excluded.topic, target=excluded.target, "
+            "band_lo=excluded.band_lo, band_hi=excluded.band_hi, "
+            "started_at=excluded.started_at, updated_at=excluded.updated_at, "
+            "note=excluded.note",
+            (user_id, str(module), str(topic), int(target), int(band_lo),
+             int(band_hi), started, now, str(note or "")[:300]))
+
+    async def clear_block(self, user_id: str) -> None:
+        user_id = _require_user(user_id)
+        await self.db.execute("DELETE FROM blocks WHERE user_id=?", (user_id,))
+
     # ==================================================================
     # 方案与反馈
     # ==================================================================

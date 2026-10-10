@@ -103,6 +103,8 @@ def _adopt_bundled_data(old: str, new: str) -> tuple[str, str]:
 # 所以按导入方式退而求其次 —— 这不是将就，是因为同一个文件确实会被两种方式加载。
 try:
     from .core import accounts as accm
+    from .core import blocks as blocksm
+    from .core import curriculum as cur
     from .core import db as dbm
     from .core import llm as llmm
     from .core import log as logm
@@ -112,6 +114,8 @@ try:
     from .core import sync as syncm
 except ImportError:                       # 作为顶层模块导入（自测 / 手工调试）
     from core import accounts as accm     # type: ignore[no-redef]
+    from core import blocks as blocksm    # type: ignore[no-redef]
+    from core import curriculum as cur    # type: ignore[no-redef]
     from core import db as dbm            # type: ignore[no-redef]
     from core import llm as llmm          # type: ignore[no-redef]
     from core import log as logm          # type: ignore[no-redef]
@@ -176,6 +180,11 @@ REVIEW_TRIGGER_RE = (
 #: 撞上之后 AstrBot 会让两个插件都处理同一条消息。
 GROUP_NAME = "xcpc"
 
+#: 「光发一个组名」—— `/xcpc`、`!xcpc`、`xcpc` 都算，**后面不能带东西**。
+#: 命中它就等于 `/xcpc 方案`（见 `bare_xcpc`）。必须锚死首尾，
+#: 否则 `/xcpc 方案` 这种带子命令的也会被它抢走。
+BARE_CMD_RE = re.compile(r"^\s*[/／!！#]?\s*%s\s*$" % GROUP_NAME, re.I)
+
 #: 帮助里显示的指令前缀。写成常量，改组名时不用满文件找。
 CMD = "/" + GROUP_NAME
 
@@ -225,7 +234,29 @@ HELP_LOG = f"""{CMD} 日志 [n]  —— 看最近 n 条日志（默认 20）
 凭据（Cookie / 密码 / token）在写进日志**之前**就已经打码，
 所以可以直接贴出来求助。"""
 
-HELP_MAIN = f"""XCPC 备赛助手
+#: 默认帮助。**故意很短** —— 只列每天真的要用的那几条。
+#:
+#: 之前这里是 48 行、24 个子命令，用户的原话是「指令似乎太多了，
+#: 我都不知道怎么用了」。那些指令一条都没删（`/xcpc 帮助 更多` 里都在），
+#: 只是不再挡在他面前 —— **能用**和**必须知道**是两件事。
+HELP_MAIN = f"""XCPC 备赛助手 —— QQ 里的训练教练
+
+  {CMD}             今天的方案      ← 记不住别的就发这个
+  {CMD} 打卡        今天做完了（也可以发 {CMD} 做了一半 / {CMD} 没做）
+  {CMD} 块          看当前训练专题，或者换一个
+  {CMD} 绑定        关联 Codeforces / AtCoder / 洛谷 / QOJ
+  {CMD} 同步        立刻拉一次做题记录
+  {CMD} 自检        哪儿不对、下一步该发哪条
+
+第一次用：绑定 → 同步 → 直接发一个 {CMD}。每一步它都会告诉你下一步发什么。
+
+全部指令（复盘 / 解析 / 比赛 / 日志 / 题库 / 订阅 / 推送测试…）：{CMD} 帮助 更多
+
+⚠️ 三个限制：QOJ 要登录才能看记录 · AtCoder 的 API 没有算法标签 ·
+   洛谷要手动导 Cookie。细节：{CMD} 帮助 绑定"""
+
+#: 完整指令表。老的 `HELP_MAIN` 原样搬过来当"更多"，一条都没丢。
+HELP_MORE = f"""XCPC 备赛助手（完整指令表）
 在 QQ 里同步你的做题记录，然后每天告诉你下一步做什么。
 
 指令都挂在 {CMD} 下面（这样才不会和别的插件撞名）。
@@ -281,6 +312,7 @@ HELP_TOPICS = {
     "绑定": HELP_BIND, "bind": HELP_BIND,
     "登录": HELP_BIND, "账号": HELP_BIND,
     "日志": HELP_LOG, "log": HELP_LOG,
+    "更多": HELP_MORE, "more": HELP_MORE, "全部": HELP_MORE, "all": HELP_MORE,
 }
 
 FORMAT_TEXT = """复盘模板（照抄，把冒号后面填上就行）：
@@ -2034,6 +2066,46 @@ class XcpcPlugin(Star):
         这是这个插件的核心。**它会真的调模型**（花 token），所以默认**不**自动同步 ——
         用 /xcpc 同步 先把数据弄新，再来要方案。
         """
+        text = _cmd_text(event)
+        # 把命令词之后的剩余部分当成"额外要求"
+        extra = ""
+        m = re.search(r"(?:方案|plan|下一步|今天做什么)\s*(.*)$", text, re.S)
+        if m and m.group(1).strip():
+            extra = m.group(1).strip()
+        async for r in self._do_plan(event, extra):
+            yield r
+
+    @filter.regex(BARE_CMD_RE)
+    async def bare_xcpc(self, event: AstrMessageEvent):
+        """**光发一个 `/xcpc`（不带子命令）= 要今天的方案。**
+
+        v0.6.0 加的。在此之前这条消息什么都不做 —— 命令组有个空的 handler，
+        用户发了 `/xcpc` 只会在群里石沉大海。
+
+        加它的理由很直接：插件长到 24 个子命令之后，用户的原话是
+        「指令太多了，我都不知道怎么用了」。既然记不住，那就让
+        **最常做的那件事成为默认动作** —— 只要记得插件叫什么就行。
+
+        用 `filter.regex` 而不是给命令组加个默认 handler：前者是我们能测的，
+        后者依赖 AstrBot 内部怎么派发"裸组名"，不同版本行为可能不一样。
+        """
+        raw = (event.message_str or "").strip()
+        if raw[:1] in ("/", "／", "!", "！", "#"):
+            raw = raw[1:].lstrip()
+        if raw.lower() != GROUP_NAME.lower():
+            return
+        async for r in self._do_plan(event, ""):
+            yield r
+        event.stop_event()
+
+    async def _do_plan(self, event: AstrMessageEvent, extra: str):
+        """`/xcpc 方案` 和裸 `/xcpc` 共用的实现。`extra` 是附带的额外要求。"""
+        # v0.6.0 补的权限检查。**此前 `/xcpc 方案` 是没有这一道的** ——
+        # 而这一条会真的调模型、花 token。加了裸 `/xcpc` 之后它还会被
+        # 群里任何人一句 "xcpc" 触发，所以必须补上。
+        if not self._sender_allowed(event):
+            yield event.plain_result("没有权限。")
+            return
         store, err = self._store_or_error()
         if err:
             yield event.plain_result(err)
@@ -2058,7 +2130,7 @@ class XcpcPlugin(Star):
                 "还没有数据，先做两步：\n"
                 "  1. /xcpc 绑定      —— 去网页填 handle\n"
                 "  2. /xcpc 同步      —— 把记录拉下来\n"
-                "然后再 /xcpc 方案。\n\n"
+                "然后再发一个 /xcpc 就行。\n\n"
                 "（**不是「你的水平是零」，是「我还没拿到数据」** —— "
                 "这两件事完全不同。）")
             return
@@ -2213,6 +2285,143 @@ class XcpcPlugin(Star):
         但前提是系统知道真实情况。
         """
         yield await self._log_task(event, "skipped", "/xcpc 没做")
+
+    @xcpc.command("块", alias={"block", "专题", "训练块"})
+    async def cmd_block(self, event: AstrMessageEvent):
+        """看/换当前训练专题。用法：/xcpc 块 [下一个|专题名|关]
+
+        v0.6.0 加的。`/xcpc 块` 不带参数就是看一眼进度。
+
+        为什么要有这条：训练块是**一段连续的日子里只吃一个子专题**，
+        默认由系统按阶梯自动开（用户不该先学会一条命令才能拿到有针对性的
+        方案）。但"自动"必须留一个手动出口 —— 他可能刚打完一场比赛发现
+        自己差分约束全不会，那时候按阶梯排队就是傻等。
+        """
+        if not self._sender_allowed(event):
+            yield event.plain_result("没有权限。")
+            return
+        store, err = self._store_or_error()
+        if err:
+            yield event.plain_result(err)
+            return
+        uid = self._uid(event)
+        try:
+            await store.ensure_user(uid)
+        except Exception as exc:                       # noqa: BLE001
+            logger.warning("[xcpc] 块命令 ensure_user 失败: %s", exc)
+
+        arg = _cmd_text(event).strip()
+        # 剥掉命令词本身，剩下的当参数
+        m = re.search(r"(?:块|block|专题|训练块)\s*(.*)$", arg, re.I | re.S)
+        arg = (m.group(1).strip() if m else "")
+
+        blk = await store.get_block(uid)
+        try:
+            subs = await store.list_submissions(uid, limit=100000)
+        except Exception as exc:                       # noqa: BLE001
+            logger.warning("[xcpc] 块命令读提交失败: %s", exc)
+            subs = []
+        bank = {}
+        try:
+            bank = await self.loop._load_bank()
+        except Exception as exc:                       # noqa: BLE001
+            logger.warning("[xcpc] 块命令读题库失败: %s", exc)
+
+        cov = blocksm.coverage(subs, bank)
+        low = arg.lower()
+
+        # 关掉 / 清空
+        if low in ("关", "关闭", "清空", "取消", "off", "clear", "none", "停"):
+            if not blk:
+                yield event.plain_result("现在没有训练块。发一个 %s 就会自动开一个。" % CMD)
+                return
+            await store.clear_block(uid)
+            yield event.plain_result(
+                "训练块关掉了。下一条 %s 会重新按阶梯自动开一个 —— "
+                "一般是接着最靠前的那个没吃透的子专题。" % CMD)
+            return
+
+        # 下一个
+        if low in ("下一个", "下一個", "next", "换", "换一个"):
+            if not blk:
+                mod = blocksm.pick_module(subs, bank, cov)
+                tkey = blocksm.choose(mod, cov)
+            else:
+                # ★ 从**当前这一格**往后退，不是从阶梯开头算。
+                # 从开头算的话，用户点名开在「背包」上再按"下一个"，
+                # 会退回背包自己（第一个还没吃透的是线性 DP，它的下一个正是背包）。
+                mod, tkey = blocksm.next_block(str(blk["module"]), cov,
+                                               after=str(blk["topic"]))
+            t = cur.BY_KEY.get(tkey)
+            if t is None:
+                yield event.plain_result("专题阶梯里没有下一个了。")
+                return
+            await store.set_block(uid, mod, tkey, target=t.count,
+                                  band_lo=t.lo, band_hi=t.hi,
+                                  note=blocksm.reason(tkey, cov))
+            prog = blocksm.progress(subs, bank,
+                                   dict(await store.get_block(uid)))
+            yield event.plain_result(
+                "换好了。\n\n" + blocksm.describe(dict(await store.get_block(uid)),
+                                                  cov, prog)
+                + "\n\n发一个 %s 看看今天的题。" % CMD)
+            return
+
+        # 指定某个专题（按 key 或中文名）
+        if arg:
+            want = arg.lower().replace(" ", "")
+            hit = None
+            for t in cur.ALL_TOPICS:
+                if (want == t.key.lower() or want == t.name.lower().replace(" ", "")
+                        or want in t.name.lower().replace(" ", "")):
+                    hit = t
+                    break
+            if hit is None:
+                yield event.plain_result(
+                    "没找到「%s」这个专题。发 %s 块 看完整阶梯。" % (arg, CMD))
+                return
+            await store.set_block(uid, hit.module, hit.key, target=hit.count,
+                                  band_lo=hit.lo, band_hi=hit.hi,
+                                  note=blocksm.reason(hit.key, cov))
+            prog = blocksm.progress(subs, bank, dict(await store.get_block(uid)))
+            yield event.plain_result(
+                "好，接下来就啃这个。\n\n"
+                + blocksm.describe(dict(await store.get_block(uid)), cov, prog))
+            return
+
+        # 不带参数：看一眼
+        if blk:
+            prog = blocksm.progress(subs, bank, dict(blk))
+            body = [blocksm.describe(dict(blk), cov, prog), ""]
+            body.append("换一个：%s 块 下一个　　直接点名：%s 块 <专题名>　　"
+                        "关掉：%s 块 关" % (CMD, CMD, CMD))
+            body.append("")
+            body.append("完整阶梯（打到一半的在前）：")
+            for mod_key in ("dp", "graph"):
+                mname = cur.MODULES[mod_key]["name"]
+                body.append("  【%s】" % mname)
+                for t in cur.topics_of(mod_key):
+                    have = int(cov.get(t.key, 0))
+                    if have >= t.count:
+                        mark = "✓"
+                    elif blocksm.needed(t.key, cov):
+                        mark = " "
+                    else:
+                        mark = "·"
+                    cur_mark = "→" if t.key == blk["topic"] else " "
+                    body.append("   %s%s %-14s %2d/%-2d  %s"
+                                % (cur_mark, mark, t.name, have, t.count,
+                                   t.idea[:34]))
+        else:
+            mod = blocksm.pick_module(subs, bank, cov)
+            tkey = blocksm.choose(mod, cov)
+            t = cur.BY_KEY.get(tkey)
+            body = ["现在没有训练块。"]
+            if t is not None:
+                body.append("按阶梯，下一个该啃的是「%s」。" % t.name)
+            body.append("")
+            body.append("发一个 %s 就会自动开一个 —— 不用手动设。" % CMD)
+        yield event.plain_result("\n".join(body))
 
     async def _log_task(self, event: AstrMessageEvent, status: str, cmd: str):
         store, err = self._store_or_error()

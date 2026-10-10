@@ -5,7 +5,7 @@
 重点：
   1. **LLM 失败时不降级**：报错 + 取出上一版方案（并说明这是旧的）
   2. 候选池的难度区间由**数据**推出（不是模型拍脑袋）
-  3. 有回避方向时，那个方向被"规则注入"到候选池
+  3. **训练块**（v0.6.0）：候选池以"当前子专题"为主，不再按回避方向每天换
   4. 反馈能存能取
   5. 全链路用假 provider，不调真模型
 
@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 
 from core import db as dbm        # noqa: E402
 from core import llm as llmm      # noqa: E402
+from core import curriculum as cur  # noqa: E402
 from core import loop as loopm    # noqa: E402
 from core import store as stm     # noqa: E402
 from platforms.base import Problem, Submission  # noqa: E402
@@ -108,14 +109,25 @@ async def setup(*, with_bank=True, n_solved=30):
                                  tags=["math"], difficulty=1500,
                                  difficulty_source="cf_rating"))
         await store.upsert_problems("codeforces", probs)
+        # ★ 洛谷的「线性 DP」题 —— 自动开的第一个训练块（dp_linear）的候选池。
+        #
+        # 为什么必须放洛谷的：`dp_linear` 在 CF 上**表达不出来**
+        # （CF 只有 38 个粗标签，没有「线性 DP」这个词，`dp` 一个标签
+        # 盖住了 2538 道题）。所以 `curriculum` 里它的 `cf=()`，
+        # 只能从洛谷挑 —— 见 core/curriculum.py 的匹配规则注释。
+        # 难度带 1000-1400 翻成洛谷是 2-3 档。
+        await store.upsert_problems("luogu", [
+            Problem("luogu", "LG:P%d" % i, "p%d" % i, tags=["线性 DP"],
+                    difficulty=3, difficulty_source="luogu_level")
+            for i in range(40)])
 
     return db, store
 
 
 PLAN_JSON = json.dumps({
     "assessment": "你 math 做了 30 题，但 dp 一道没碰。",
-    "tasks": [{"kind": "practice", "title": "做一道 dp", "problem": "CF:DP0",
-               "minutes": 45, "why": "补回避的方向"}],
+    "tasks": [{"kind": "practice", "title": "做一道线性 DP", "problem": "LG:P1",
+               "minutes": 45, "why": "当前训练块就是这个方向"}],
     "watch": "别怕难题",
 }, ensure_ascii=False)
 
@@ -136,9 +148,10 @@ def test_happy():
         check("拿到方案", r.plan is not None and len(r.plan.tasks) == 1)
         check("没退回上一版", r.used_previous is False)
         check("汇总非空", len(r.summary_text) > 100)
-        # dp 那道题在候选池里（因为回避方向被注入）
-        check("候选池里有 dp 方向的题（规则注入生效）",
-              "CF:DP0" in r.summary_text, "")
+        # 自动开出来的训练块应该是最下面那道"洛谷线性 DP"题
+        check("★ 自动开了训练块（阶梯第一个子专题 dp_linear）",
+              "当前训练块" in r.summary_text and "线性 DP" in r.summary_text, "")
+        check("候选池里有训练块的题", "LG:P" in r.summary_text, "")
         # 提示词确实带上了汇总
         check("提示词里带了汇总", "训练数据汇总" in ctx.calls[0]["prompt"])
         await db.close()
@@ -170,7 +183,7 @@ def test_no_degradation():
         check("失败说明里有原因", "500" in r2.detail, r2.detail)
         check("取出了上一版方案", r2.used_previous and r2.plan is not None)
         check("上一版是旧的那份",
-              r2.plan is not None and r2.plan.tasks[0].problem == "CF:DP0")
+              r2.plan is not None and r2.plan.tasks[0].problem == "LG:P1")
 
         text = r2.text()
         check("文本里明确说这是上一次的方案",
@@ -209,11 +222,11 @@ def test_bad_output():
 
 
 # ---------------------------------------------------------------------------
-# 4. 难度区间由数据推出
+# 4. 训练块：难度带按平台分别翻译
 # ---------------------------------------------------------------------------
 
-def test_target_band():
-    print("\n[4] 难度区间由数据推出")
+def test_block_band():
+    print("\n[4] 训练块的难度带按平台分别翻译")
 
     async def main():
         db, store = await setup()
@@ -221,54 +234,59 @@ def test_target_band():
         prep = await lp.prepare("u1", auto_sync=False)
         info = prep["summary"]
 
-        check("识别出主来源是 cf_rating", "cf_rating" in info.by_source)
-        med = info.by_source["cf_rating"]["median"]
-        check("中位难度是 1500", med == 1500.0, repr(med))
+        blk = dict(info.block or {})
+        check("★ 自动开了训练块", blk.get("topic") == "dp_linear",
+              repr(blk.get("topic")))
+        check("块里存的是 CF 尺子的难度带",
+              (blk.get("band_lo"), blk.get("band_hi")) == (1000, 1400),
+              repr((blk.get("band_lo"), blk.get("band_hi"))))
+        check("target 取自 curriculum", blk.get("target") == 15,
+              repr(blk.get("target")))
+        check("started_at 有值（进度从这里起算）", bool(blk.get("started_at")),
+              repr(blk.get("started_at")))
 
-        # 候选池 = 回避方向（放宽难度，排前面）+ 常规（目标区间）
+        # ★ 同一条 lo/hi 在两个平台上要分别翻译 —— 洛谷是 1-7 档。
+        # CF 1000-1400 翻成洛谷是 3-4 档（普及/提高- ~ 普及+/提高）。
+        # ★ 这条断言的重点不是"正好是 3-4"，而是**它被翻译过** ——
+        # 直接拿 1000/1400 去卡洛谷的 1-7 档会一道都挑不出来
+        # （v0.5.14 真机：`0-199：308 题`）。
+        check("★ 洛谷的带子被翻译成 1-7 档（不是照抄 CF 的 1000/1400）",
+              cur.band_for(cur.BY_KEY["dp_linear"], "luogu") == (3, 4),
+              repr(cur.band_for(cur.BY_KEY["dp_linear"], "luogu")))
+        check("CF 的带子原样",
+              cur.band_for(cur.BY_KEY["dp_linear"], "codeforces") == (1000, 1400),
+              repr(cur.band_for(cur.BY_KEY["dp_linear"], "codeforces")))
+
         cands = prep["candidates"]
         check("候选池非空", len(cands) > 0, "%d" % len(cands))
         check("排除了已经做过的题",
               all(c["problem_key"] not in {"CF:MA%d" % i for i in range(30)}
                   for c in cands))
-
-        # 分开检查：**回避方向的题允许超出目标区间**（这是故意的），
-        # 常规候选必须在区间内。不能笼统地断言"全部在区间内" ——
-        # 那会把"为难的方向放宽难度"这个正确行为判成失败。
-        avoided_tags = {a["tag"] for a in info.avoided}
-        normal = [c for c in cands
-                  if not (set(c["tags"] or []) & avoided_tags)]
-        injected = [c for c in cands
-                    if set(c["tags"] or []) & avoided_tags]
-        check("常规候选落在目标区间内",
-              all(1300 <= c["difficulty"] <= 1900 for c in normal),
-              "范围 %s" % ([c["difficulty"] for c in normal][:8],))
-        if injected:
-            check("回避方向的题被放宽了难度（否则注入是空话）",
-                  max(c["difficulty"] for c in injected) > 1900,
-                  "最大 %s" % max(c["difficulty"] for c in injected))
-            check("放宽也有上限（不是无限制）",
-                  max(c["difficulty"] for c in injected) <= 2400,
-                  "最大 %s" % max(c["difficulty"] for c in injected))
+        lg = [c for c in cands if c["problem_key"].startswith("LG:")]
+        check("★ 候选里有训练块方向的洛谷题", len(lg) > 0, "%d 道" % len(lg))
+        check("★ 洛谷候选的难度落在 2-3 档（没拿 CF 的尺子去卡洛谷）",
+              all(2 <= c["difficulty"] <= 3 for c in lg),
+              repr(sorted({c["difficulty"] for c in lg})))
+        check("洛谷候选的难度的确来自 luogu_level",
+              all(c["difficulty_source"] == "luogu_level" for c in lg), "")
 
         text = info.to_text()
-        check("汇总里说明了「为什么放宽」",
-              "放宽" in text and "空话" in text, text[-600:])
-
-        text = info.to_text()
-        check("汇总里说明了区间依据", "中位难度" in text and "舒适区" in text,
-              text[-500:])
+        check("★ 汇总里有「当前训练块」那一段", "当前训练块" in text, "")
+        check("汇总里写了进度", "进度：" in text, "")
+        check("汇总里说清了「今天的任务必须从这一块出」",
+              "今天的任务必须从这一块的候选池里出" in text, "")
+        check("汇总里说明了候选池的顺序", "条是**当前训练块**" in text, "")
         await db.close()
 
     asyncio.run(main())
 
 
 # ---------------------------------------------------------------------------
-# 5. 回避方向被注入候选池
+# 5. 候选池以训练块为主
 # ---------------------------------------------------------------------------
 
-def test_avoidance_injection():
-    print("\n[5] 回避方向注入候选池")
+def test_block_candidates():
+    print("\n[5] 候选池以训练块为主")
 
     async def main():
         db, store = await setup()
@@ -276,19 +294,34 @@ def test_avoidance_injection():
         prep = await lp.prepare("u1", auto_sync=False)
         info = prep["summary"]
 
-        check("认出了 dp 是回避方向",
-              any(a["tag"] == "dp" for a in info.avoided),
-              repr([a["tag"] for a in info.avoided]))
-
         cands = prep["candidates"]
-        dp_cands = [c for c in cands if "dp" in (c["tags"] or [])]
-        check("候选池里有 dp 的题（被注入）", len(dp_cands) > 0,
-              "%d 道" % len(dp_cands))
-        # 注入的应该排在前面
-        if dp_cands and cands:
-            check("dp 的题排在候选池前面",
-                  cands[0]["problem_key"].startswith("CF:DP"),
-                  cands[0]["problem_key"])
+        lg = [c for c in cands if c["problem_key"].startswith("LG:")]
+        check("候选池里有训练块的题", len(lg) > 0, "%d 道" % len(lg))
+        check("★ 训练块的题排在最前面（顺序本身就是给模型的暗示）",
+              cands[0]["problem_key"].startswith("LG:"), cands[0]["problem_key"])
+        # 块外的兜底候选可以存在，但必须排在块的后面
+        first_other = next((i for i, c in enumerate(cands)
+                            if not c["problem_key"].startswith("LG:")), None)
+        check("★ 兜底候选排在训练块候选之后",
+              first_other is None or first_other >= len(lg),
+              "第一个非块内候选在第 %s 位，块内共 %d 道" % (first_other, len(lg)))
+
+        # 没有块时（新用户第一次），prepare 会**自己开一个** ——
+        # 用户不该先学会一条命令才能拿到有针对性的方案。
+        blk = await store.get_block("u1")
+        check("★ prepare 顺手把块落库了（不用用户先发命令）",
+              blk is not None and blk["topic"] == "dp_linear",
+              repr(dict(blk) if blk else None))
+
+        # 再跑一次不该换块，也不该把进度起点推后
+        before = blk["started_at"]
+        prep2 = await lp.prepare("u1", auto_sync=False)
+        blk2 = await store.get_block("u1")
+        check("第二次 prepare 不换块", blk2["topic"] == "dp_linear", blk2["topic"])
+        check("★ 重复开块不会把 started_at 推后（否则进度永远停在 0）",
+              blk2["started_at"] == before,
+              "%s -> %s" % (before, blk2["started_at"]))
+        check("第二次候选池还在", len(prep2["candidates"]) > 0, "")
         await db.close()
 
     asyncio.run(main())
@@ -409,53 +442,54 @@ def test_load_bank_not_truncated():
     asyncio.run(main())
 
 
-def test_avoid_candidates_interleaved():
-    """★ 回避方向的候选要**轮流交错**，不能一个方向刷满前排。
+def test_topic_platform_interleave():
+    """★ 同一个子专题在两个平台上都有题时，候选要**两个平台轮流取**。
 
-    真机翻车：`want = [前两个回避方向]` 之后**一次性**调 `pick_candidates`，
-    标签命中多的排前面 → 前 12 条**全是树题** → 模型一口气排了三道树，
-    而提示词里明明写着「一道就够」。
-    **候选池的排列顺序本身就是给模型的暗示**，它比提示词里多写一句管用。
+    为什么不能一把捞完洛谷再接 CF：**候选池的排列顺序本身就是给模型的暗示**。
+    洛谷的题凑齐了排在前面，模型就只会报洛谷题号 —— 而他两个平台都在打。
+    真机翻车见 v0.5.14（前 12 条全是树题 → 模型一口气排了三道树）。
+
+    这里用 `dp_tree`：它在洛谷有「树形 DP」，在 CF 有 `dp`+`trees`，
+    两边都有货，正好能验交错。
     """
-    print("\n[10] 回避方向的候选要交错")
+    print("\n[10] 训练块的候选要跨平台交错")
 
     async def main():
         db, store = await setup(with_bank=False)
-        probs = []
-        for i in range(200):
-            probs.append(Problem("codeforces", "CF:MA%d" % i, "ma%d" % i,
-                                 tags=["math"], difficulty=1400,
-                                 difficulty_source="cf_rating"))
-        # 两个"难且没碰过"的方向，难度都落在放宽后的区间里
-        for i in range(60):
-            probs.append(Problem("codeforces", "CF:TR%d" % i, "tr%d" % i,
-                                 tags=["trees"], difficulty=2200,
-                                 difficulty_source="cf_rating"))
-        for i in range(60):
-            probs.append(Problem("codeforces", "CF:GR%d" % i, "gr%d" % i,
-                                 tags=["graphs"], difficulty=2100,
-                                 difficulty_source="cf_rating"))
-        await store.upsert_problems("codeforces", probs)
+        # 洛谷：树形 DP，4 档（dp_tree 的洛谷带是 4-5）
+        await store.upsert_problems("luogu", [
+            Problem("luogu", "LG:T%d" % i, "lt%d" % i, tags=["树形 DP"],
+                    difficulty=4, difficulty_source="luogu_level")
+            for i in range(40)])
+        # CF：dp + trees，1600（dp_tree 的 CF 带是 1400-1800）
+        await store.upsert_problems("codeforces", [
+            Problem("codeforces", "CF:T%d" % i, "ct%d" % i, tags=["dp", "trees"],
+                    difficulty=1600, difficulty_source="cf_rating")
+            for i in range(40)])
         await store.upsert_submissions(
             "u1", "codeforces",
             [sub(i, "CF:MA%d" % i, diff=1400) for i in range(30)])
+        # 手动把块设成 dp_tree
+        await store.set_block("u1", "dp", "dp_tree", target=20,
+                              band_lo=1400, band_hi=1800, note="")
 
         lp = loopm.Loop(db, store)
         prep = await lp.prepare("u1", auto_sync=False)
-        order = [a["tag"] for a in prep["summary"].avoided]
-        check("至少认出两个回避方向", len(order) >= 2, repr(order))
-        check("★ 前两个正好是 trees / graphs",
-              order[:2] == ["trees", "graphs"], repr(order))
-
         cands = prep["candidates"]
-        check("候选池有货", len(cands) >= 4, str(len(cands)))
-        head = [set(c.get("tags") or []) & {"trees", "graphs"} for c in cands[:6]]
-        check("★ 前几条里两个方向都出现了",
-              any("trees" in t for t in head) and any("graphs" in t for t in head),
-              repr([sorted(t) for t in head]))
-        check("★ 相邻两条不是同一个方向（trees, graphs, trees, graphs…）",
+        check("候选池有货", len(cands) >= 6, str(len(cands)))
+        head = [c["problem_key"].split(":")[0] for c in cands[:6]]
+        check("★ 前几条里两个平台都出现了",
+              "LG" in head and "CF" in head, repr(head))
+        check("★ 相邻两条不是同一个平台（LG, CF, LG, CF…）",
               all(head[i] != head[i + 1] for i in range(len(head) - 1)),
-              repr([sorted(t) for t in head]))
+              repr(head))
+        # 块是 dp_tree，两边的题都必须真的是这个子专题
+        check("洛谷候选的标签是「树形 DP」",
+              all("树形 DP" in (c.get("tags") or []) for c in cands
+                  if c["problem_key"].startswith("LG:")), "")
+        check("CF 候选同时带 dp 和 trees",
+              all({"dp", "trees"} <= set(c.get("tags") or []) for c in cands
+                  if c["problem_key"].startswith("CF:")), "")
         await db.close()
 
     asyncio.run(main())
@@ -468,10 +502,10 @@ def main() -> int:
     test_happy()
     test_no_degradation()
     test_bad_output()
-    test_target_band()
-    test_avoidance_injection()
+    test_block_band()
+    test_block_candidates()
     test_load_bank_not_truncated()
-    test_avoid_candidates_interleaved()
+    test_topic_platform_interleave()
     test_feedback()
     test_empty_uid()
     print("\n" + "=" * 62)

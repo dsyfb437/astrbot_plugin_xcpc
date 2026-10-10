@@ -42,7 +42,7 @@ from typing import Any, Iterable
 
 # 用 PRAGMA user_version 做迁移版本号。
 # 加新表/加列时：**不要改老语句**，在后面追加一条 _MIGRATIONS 项。
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _TABLES_V1 = """
 -- 用户与账号绑定。
@@ -249,6 +249,43 @@ _MIGRATIONS: list[tuple[int, list[str]]] = [
         # 反而把他真正的记录也挡在外面。清空之后下一次同步是**全量**。
         """UPDATE sync_state SET last_epoch=NULL, last_ok_at=NULL
            WHERE platform='qoj'""",
+    ]),
+    (6, [
+        # ---- 「训练块」：一次只吃一个子专题（v0.6.0）----
+        #
+        # 为什么要有这张表：v0.6.0 之前方案引擎是**无状态**的 ——
+        # 每天的方案独立生成，唯一输入是全局统计，所以输出当然每天长得一样。
+        # 用户的原话：
+        #
+        #     像这样子推荐一个两个题练一下我感觉根本没效果啊，也没有针对性，
+        #     每次似乎都是从整体做题情况出发
+        #
+        # 他说得对。一道题改变不了任何东西 —— 一个子专题要吃 15-20 道才谈得上
+        # 入门，而"每天一道、还跨三个方向"意味着每个方向一天 0.5 道。
+        # 这是训练量的算术问题，方案层怎么优化都绕不过去。
+        #
+        # 所以引入"训练块"：**一段连续的日子里只吃一个子专题**，
+        # 吃够了（target 道）再走阶梯上的下一个。
+        #
+        # 每个用户同时只有**一个**块（主键就是 user_id）——
+        # "同时开三个专题"正是要治的病。
+        #
+        # 进度**不存这张表**：它由 `submissions` 里 `started_at` 之后、
+        # 命中该子专题标签的 AC 题数算出来（`Store.block_progress`）。
+        # 存一个计数器就要处理"重复 AC 同题""补题算不算""跨平台"——
+        # 而这些都是查询能回答的问题，存下来只会多一个会漂移的副本。
+        """CREATE TABLE IF NOT EXISTS blocks (
+            user_id     TEXT PRIMARY KEY,
+            module      TEXT NOT NULL,      -- dp / graph（curriculum.MODULES 的 key）
+            topic       TEXT NOT NULL,      -- curriculum 里 Topic.key（稳定 id）
+            target      INTEGER NOT NULL,   -- 这个子专题打算吃多少道
+            band_lo     INTEGER NOT NULL,   -- 难度带（CF rating）
+            band_hi     INTEGER NOT NULL,
+            started_at  TEXT NOT NULL,      -- 进度从这个时刻之后开始算
+            updated_at  TEXT NOT NULL,
+            note        TEXT                -- 为什么选它（给用户看的理由）
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_blocks_topic ON blocks(topic)""",
     ]),
 ]
 

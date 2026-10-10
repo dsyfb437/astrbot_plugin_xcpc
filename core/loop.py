@@ -33,6 +33,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from . import blocks as blocksm
+from . import curriculum as cur
 from . import llm as llmm
 from . import log as logm
 from . import summary as summ
@@ -165,68 +167,73 @@ class Loop:
             median = base.by_source[primary].get("median")
         lo, hi = _target_band(median, -200, 400)
 
-        # 有回避方向时，那些 tag 要提到前面 —— 这是"规则注入"。
+        # ---- 训练块：一段连续的日子里只吃一个子专题（v0.6.0）----
         #
-        # ⚠️ **注入时必须放宽难度限制**，否则会静默失效。
+        # 这一段取代了 v0.5.x 的"回避方向注入"。那个做法本身没错
+        # （数据告诉我们 dp/rutures 弱 → 推几道 dp），但它**解决不了用户的问题**：
         #
-        # 踩过的坑：回避方向的题之所以被回避，正是因为它**偏难**（题库中位比整体高）。
-        # 而候选池的难度区间是围绕"他做过的题的中位难度"定的 ——
-        # 于是那些题**全被区间过滤掉了**，"注入"成了空操作：
-        # 汇总里写着"疑似回避 dp"，候选池里却一道 dp 都没有。
+        #     像这样子推荐一个两个题练一下我感觉根本没效果啊，也没有针对性，
+        #     每次似乎都是从整体做题情况出发
         #
-        # 难的方向本来就该比舒适区高，所以给它们单独放宽一档。
-        want = [a["tag"] for a in base.avoided][:2]
-        avoided_cands = []
-        if want and median is not None:
-            # **按 tag 分别挑，再轮流交错** —— 不能一次把两个 tag 丢进去。
-            #
-            # 真机翻车现场：want = ["trees", "data structures"]，一次挑出来的
-            # 前 12 条**全是树题**（trees 命中数高的排在前面），模型于是就排了
-            # 三道树题 —— 而提示词里明明写着「一道就够」。
-            # **候选池的排列顺序本身就是给模型的暗示**，它比提示词里多写一句管用。
-            per = max(3, 12 // len(want))
-            pools = [
-                summ.pick_candidates(
-                    subs, bank, want_tags=[t], limit=per,
-                    min_difficulty=int(median) - 200,
-                    max_difficulty=int(median) + 900,   # 放宽：难的方向本来就该更高
-                    source=primary or "cf_rating")
-                for t in want
-            ]
-            # 轮流取，让两个方向在列表顶部交替出现（trees, dp, trees, dp…）
-            for i in range(max((len(p) for p in pools), default=0)):
-                for p in pools:
-                    if i < len(p):
-                        avoided_cands.append(p[i])
+        # 他说得对 —— 回避注入每天仍在换方向：今天 trees 明天 graphs，
+        # 每个方向一天半道题。**方向对了，量不对，等于没练。**
+        # 训练块把"方向"钉住一段时间，量才攒得起来。
+        #
+        # 块的候选池排在**最前面** —— 候选池的排列顺序就是给模型的暗示，
+        # 这比在提示词里多写一句"要有针对性"管用得多（v0.5.14 的教训）。
+        blk = await self.store.get_block(user_id)
+        cov = blocksm.coverage(subs, bank)
+        if not blk:
+            mod = blocksm.pick_module(subs, bank, cov)
+            tkey = blocksm.choose(mod, cov)
+            t = cur.BY_KEY.get(tkey)
+            if t is not None:
+                await self.store.set_block(
+                    user_id, mod, tkey, target=t.count, band_lo=t.lo, band_hi=t.hi,
+                    note=blocksm.reason(tkey, cov))
+                blk = await self.store.get_block(user_id)
+        blk = dict(blk) if blk else {}
+        topic = cur.BY_KEY.get(str(blk.get("topic") or ""))
+        prog = blocksm.progress(subs, bank, blk) if topic is not None else {}
 
+        topic_cands = (summ.pick_topic_candidates(subs, bank, topic, limit=30)
+                       if topic is not None else [])
+
+        # 兜底候选：冷门子专题 + 难度带窄 + 他已经做过一部分时，
+        # 这一块可能只剩几道题。那时还得有别的题可挑。
+        # **排在训练块候选后面** —— 位置本身就是"优先挑前面的"的暗示。
         normal_cands = summ.pick_candidates(
-            subs, bank, limit=36,
+            subs, bank, limit=12,
             min_difficulty=lo if median is not None else None,
             max_difficulty=hi if median is not None else None,
             source=primary or "cf_rating")
 
-        # 回避方向的排前面，然后接常规候选；按 key 去重
+        # 训练块的排前面，然后接兜底候选；按 key 去重
         seen: set[str] = set()
         candidates: list[dict] = []
-        for c in avoided_cands + normal_cands:
+        for c in topic_cands + normal_cands:
             k = c["problem_key"]
             if k in seen:
                 continue
             seen.add(k)
             candidates.append(c)
-        candidates = candidates[:48]
+        candidates = candidates[:42]
 
         info = await summ.build(self.store, user_id, bank=bank,
-                                candidates=candidates)
+                                candidates=candidates,
+                                block=blk,
+                                block_progress=prog)
+        if topic is not None:
+            info.notes.append(
+                "候选池前 %d 条是**当前训练块**「%s」的题（难度带 %s，"
+                "两个平台各自的尺子分开翻）。后面的 %d 条是兜底，"
+                "**优先从前面的里挑**。" % (len(topic_cands), topic.name,
+                                        cur.band_for(topic, "codeforces"),
+                                        len(normal_cands)))
         if median is not None:
             info.notes.append(
-                "候选池的难度区间是 %s~%s，依据是你做过的题的中位难度（%s）。"
+                "兜底候选的难度区间是 %s~%s，依据是你做过的题的中位难度（%s）。"
                 "这是按「比舒适区略难」算的，不是随便定的。" % (lo, hi, median))
-            if avoided_cands:
-                info.notes.append(
-                    "回避方向的题（%s）**单独放宽了难度上限**到 %d —— "
-                    "因为那些题本来就偏难，不放宽的话「推你做 dp」就是句空话。"
-                    % ("、".join(want), int(median) + 900))
         else:
             info.notes.append(
                 "题目还没有难度信息，候选池**没做难度筛选** —— "

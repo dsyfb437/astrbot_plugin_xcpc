@@ -239,7 +239,7 @@ def test_migration_v5() -> None:
     光改代码不够：游标早就推进了，下次同步只拉新的，库里那 700 多行
     错数据会永远错下去。所以老行要在库里一次性翻新。
     """
-    print("\n[5] v5 迁移：库里已经存坏的行怎么翻新")
+    print("\n[5] 历史迁移：库里已经存坏的行怎么翻新")
 
     tmp = tempfile.mkdtemp(prefix="xcpc_db5_")
     conn = dbm.connect_sync(os.path.join(tmp, "xcpc.db"))
@@ -272,7 +272,9 @@ def test_migration_v5() -> None:
     conn.commit()
 
     v = dbm.migrate_sync(conn)
-    check("迁到 v5", v == 5 and dbm.SCHEMA_VERSION == 5, "实际 %d" % v)
+    # ★ 别把版本号写死在这里 —— 加一次迁移就要改一遍测试，
+    # 而这条测试真正要验的是"坏行被翻新了"，不是"版本号是几"。
+    check("迁到最新版本", v == dbm.SCHEMA_VERSION and v >= 5, "实际 %d" % v)
 
     def one(sql, *a):
         return conn.execute(sql, a).fetchone()[0]
@@ -313,7 +315,8 @@ def test_migration_v5() -> None:
     conn.execute("PRAGMA user_version=4")
     conn.commit()
     dbm.migrate_sync(conn)
-    check("重复迁移是幂等的（版本回到 5）", dbm.schema_version_sync(conn) == 5)
+    check("重复迁移是幂等的（版本还是最新）",
+          dbm.schema_version_sync(conn) == dbm.SCHEMA_VERSION)
     check("重复迁移后洛谷仍是 4 行",
           one("SELECT COUNT(*) FROM submissions WHERE platform='luogu'") == 4)
     check("重复迁移后 QOJ 仍是 0 行",

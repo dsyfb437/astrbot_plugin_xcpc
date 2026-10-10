@@ -32,6 +32,8 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
+from . import curriculum as cur
+
 # 可信度阈值：样本太少时不要给出"结论"，只给"还看不出来"
 MIN_SAMPLE_LOW = 8
 MIN_SAMPLE_MID = 20
@@ -403,6 +405,9 @@ class Summary:
     contests: dict = field(default_factory=dict)
     feedback: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)     # 口径说明 / 数据缺口
+    # 训练块（v0.6.0）：一段连续的日子里只吃一个子专题
+    block: dict = field(default_factory=dict)
+    block_progress: dict = field(default_factory=dict)
     # 供 LLM 挑题的候选（已去重、排好序）
     candidates: list[dict] = field(default_factory=list)
 
@@ -413,6 +418,27 @@ class Summary:
         if self.contest_name and self.days_to_contest is not None:
             L.append("距「%s」还有 %d 天。" % (self.contest_name, self.days_to_contest))
         L.append("")
+
+        if self.block:
+            from . import blocks as blocksm
+            L.append("## 🎯 当前训练块（**今天排什么由这一段决定**）")
+            desc = blocksm.describe(self.block, {}, self.block_progress or {})
+            if desc:
+                L.extend("  " + ln if not ln.startswith("【") else ln
+                         for ln in desc.split("\n"))
+            L.append("")
+            L.append("  **这一块的规矩是「一段连续的日子里只吃一个子专题」** —— "
+                     "一道题改变不了任何东西，一个子专题要吃 %d 道才谈得上入门。"
+                     % int(self.block.get("target") or 0))
+            L.append("  **今天的任务必须从这一块的候选池里出**（下方候选池的头部就是）。"
+                     "不要再按「哪个方向通过率低」去挑 —— 那正是「每天换一个方向、"
+                     "每个方向一天半道题」的老毛病。")
+            if self.block_progress.get("finished"):
+                L.append("  ⚠️ **这一块已经吃够了**（%d/%d）—— 今天可以安排一次检验"
+                         "（VP 或者连续几道同方向的题），顺带提醒他 `/xcpc 块 下一个`。"
+                         % (self.block_progress.get("done", 0),
+                            self.block_progress.get("target", 0)))
+            L.append("")
 
         L.append("## 总量")
         L.append("提交 %d 条，去重后 AC %d 题。" % (self.total_submissions, self.total_solved))
@@ -592,7 +618,9 @@ def _band_key(b: str) -> int:
 
 async def build(store, user_id: str, *, platform_names: dict | None = None,
                 bank: dict | None = None, contest_days: int | None = None,
-                contest_name: str = "", candidates: list | None = None) -> Summary:
+                contest_name: str = "", candidates: list | None = None,
+                block: dict | None = None,
+                block_progress: dict | None = None) -> Summary:
     """从 store 读数据并汇总。
 
     `bank` 是题库标注（`{platform: {problem_key: {tags, difficulty, ...}}}`），
@@ -605,6 +633,7 @@ async def build(store, user_id: str, *, platform_names: dict | None = None,
     platform_names = platform_names or {
         "codeforces": "CF", "atcoder": "AtCoder", "qoj": "QOJ", "luogu": "洛谷"}
     s = Summary(user_id=user_id, generated_at=logm.stamp(),
+                block=block or {}, block_progress=block_progress or {},
                 days_to_contest=contest_days, contest_name=contest_name)
 
     subs = await store.list_submissions(user_id, limit=100000)
@@ -946,6 +975,77 @@ def _field(obj, name: str, default=None):
         pass
     return getattr(obj, name, default)
 
+
+
+def pick_topic_candidates(subs: list, bank: dict, topic, *, limit: int = 24,
+                          exclude: Iterable = ()) -> list[dict]:
+    """按**一个训练块子专题**挑题（v0.6.0）。
+
+    和 `pick_candidates` 的区别（三个都不是风格问题）：
+
+      1. 它按"要注入哪几个 tag"挑，**一个 tag 池一个平台一个难度来源**；
+         这里按子专题的标签规则挑，**洛谷和 CF 都要** —— 同一个子专题
+         在洛谷叫「树形 DP」、在 CF 叫「dp + trees」，本来就是两份数据，
+         只用一边等于把题库砍一半。
+      2. 难度带要**按平台分别翻译**：洛谷是 1-7 档、CF 是 rating，
+         同一条 `lo`/`hi` 直接拿去比会筛出完全错误的题（v0.5.14 的
+         「0-199：308 题」就是这么来的）。
+      3. 排序偏好**标签少的优先**，理由同 `pick_candidates`：
+         标签是"这题会用到"，不是"这题练这个"。一道挂着 5 个标签的题
+         是"综合题"，不是"树形 DP 专练"。
+
+    匹配用**原始标签**（见 `curriculum.matches` 的注释），
+    所以这里读的 `bank` 必须是 `Loop._load_bank` 那份没归一过的。
+    """
+    from . import curriculum as _cur
+    solved = {_field(r, "problem_key") for r in subs
+              if _is_ac(_field(r, "verdict", ""))}
+    solved |= set(exclude or ())
+
+    pools: list[list[dict]] = []
+    for plat in ("luogu", "codeforces"):
+        probs = (bank or {}).get(plat) or {}
+        if not _cur.has_source(topic, plat):
+            # 这个平台表达不了这个子专题（CF 没有「拓扑排序」这种标签）。
+            # 硬凑一个近义词会把不相干的题标成"专练"，比挑不出题更糟。
+            continue
+        source = "luogu_level" if plat == "luogu" else "cf_rating"
+        lo, hi = _cur.band_for(topic, plat)
+        mid = (lo + hi) / 2.0
+        topic_tags = set(topic.lg if plat == "luogu" else topic.cf)
+        rows = []
+        for key, info in probs.items():
+            if key in solved:
+                continue
+            if info.get("difficulty_source") != source:
+                continue
+            d = info.get("difficulty")
+            if d is None or not (lo <= d <= hi):
+                continue
+            tags = info.get("tags") or []
+            if not _cur.matches(topic, plat, tags):
+                continue
+            rows.append({
+                "problem_key": key, "title": info.get("title") or "",
+                "tags": tags, "difficulty": d,
+                "difficulty_source": info.get("difficulty_source"),
+                "_extra": sum(1 for t in tags if t not in topic_tags),
+                "_dist": abs(d - mid),
+            })
+        rows.sort(key=lambda c: (c["_extra"], c["_dist"]))
+        pools.append(rows)
+
+    # 两个平台**轮流取** —— 一把捞完洛谷再接 CF 的话，候选池前面全是洛谷，
+    # 而"候选池的排列顺序本身就是给模型的暗示"（v0.5.14 血泪）。
+    out: list[dict] = []
+    for i in range(max((len(p) for p in pools), default=0)):
+        for p in pools:
+            if i < len(p):
+                out.append(p[i])
+    for c in out:
+        c.pop("_extra", None)
+        c.pop("_dist", None)
+    return out[:limit]
 
 def pick_candidates(subs: list, bank: dict, *, want_tags: list[str] | None = None,
                     limit: int = 40, min_difficulty: int | None = None,
