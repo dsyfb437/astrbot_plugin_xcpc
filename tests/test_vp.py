@@ -187,6 +187,18 @@ def test_parse():
           all(set(x) == {"contest_id", "name", "division", "start_epoch",
                          "duration_sec"} for x in got))
 
+    # ★★ 回归：真机上递进来的是 contest.list 的**整个信封**
+    # （{"status": "OK", "result": [...]}），不是裸列表。第一版只认裸列表，
+    # 于是 `for row in payload` 拿到 dict 的 key（全是 str），
+    # isinstance(row, dict) 全假 → 返回 [] → CF 一场都存不进去而单测全绿。
+    env = {"status": "OK", "result": payload}
+    got2 = vpm.parse_cf(env)
+    check("★★ 吃 contest.list 的整个信封（不是只吃裸列表）",
+          [x["contest_id"] for x in got2] == ids, [x["contest_id"] for x in got2])
+    check("信封里没有 result 时不炸",
+          vpm.parse_cf({"status": "FAILED", "comment": "x"}) == [], "")
+    check("None 不炸", vpm.parse_cf(None) == [], "")
+
     at_payload = [
         at_row("abc470", "AtCoder Beginner Contest 470"),
         at_row("arc230", "AtCoder Regular Contest 230", dur=7200),
@@ -474,6 +486,57 @@ def test_ensure_and_candidates():
         await store.upsert_contests("u1", "codeforces", [])
         got = await vpm.candidates(store, "u1")
         check("没有参加记录时不影响", "101" in [g["contest_id"] for g in got])
+
+        # ★★ 回归：走 refresh 的**全路径**，喂 CF 真实的信封形状。
+        # 上面 [3] 只测了 parse_cf 本身；第一版的 bug 恰恰在
+        # 「refresh 递整个信封、parse_cf 只认裸列表」这个接缝上，
+        # 单测直接给 parse_cf 传裸列表就绕过了它 —— 所以这里必须从
+        # refresh 进去，monkeypatch 的假数据也用信封。
+        tmp2 = tempfile.mkdtemp(prefix="xcpc_vp3_")
+        db2 = dbm.Database(os.path.join(tmp2, "t.db"))
+        ok, detail = await db2.open()
+        assert ok, detail
+        store2 = stm.Store(db2)
+        await store2.ensure_user("u1")
+
+        envelope = {"status": "OK", "result": [
+            cf_row(1123, "Codeforces Round 1123 (Div. 2)", start=1700000001),
+            cf_row(1125, "Codeforces Round 1125 (Div. 3)", start=1700000002),
+            cf_row(999, "Codeforces Round 999 (Div. 1)", phase="BEFORE"),
+        ]}
+
+        async def fake(client, url):
+            if "user.info" in url:
+                return {"status": "OK", "result": [{"rating": 1713}]}, ""
+            return envelope, ""
+
+        vpm._get_json = fake
+        try:
+            ok, detail, n = await vpm.refresh(store2, "codeforces",
+                                              handle="dsyfb_437")
+            check("★★ refresh 喂 CF 信封能解析出来（这就是真机上挂掉的那条路）",
+                  ok and n == 2, (ok, detail, n))
+            check("★ rating 也抓到了（1713 → Div.2 进白名单）",
+                  (await store2.vp_state("codeforces")).get("rating") == 1713)
+            check("★ 没结束的场次不进库",
+                  "999" not in [x["contest_id"]
+                                for x in await store2.list_vp("codeforces")])
+
+            # CF 出错时是 HTTP 200 + status=FAILED，要把 comment 报出来
+            async def failed(client, url):
+                return {"status": "FAILED",
+                        "comment": "Call limit exceeded"}, ""
+
+            vpm._get_json = failed
+            ok, detail, n = await vpm.refresh(store2, "codeforces",
+                                              handle="dsyfb_437")
+            check("★★ status=FAILED 时把对方给的原因报出来（不落进「解析出 0 条」）",
+                  (not ok) and "Call limit exceeded" in detail, detail)
+            check("★ 失败时不把库里的场次清空成空表却记 ok",
+                  (await store2.vp_state("codeforces")).get("ok") is False)
+        finally:
+            vpm._get_json = orig
+            await db2.close()
 
         await db.close()
 

@@ -182,10 +182,19 @@ def _int(v, default=0) -> int:
 def parse_cf(payload) -> list[dict]:
     """把 `contest.list` 的 result 变成我们要的那几列。
 
+    ★ **两种入参都吃**：`contest.list` 返回的是一个**信封**
+    `{"status": "OK", "result": [...]}`，`refresh` 是整个信封递进来的；
+    而单元测试图省事递的是裸列表。第一版只写了裸列表那一半，于是真机上
+    `for row in payload` 拿到的是 dict 的 key（都是 str），
+    `isinstance(row, dict)` 全假 → 返回 `[]` → 落进「解析出 0 条」分支，
+    **CF 一场都存不进去而测试全绿**。这里先拆信封，两种都认。
+
     ⚠️ **不能按 `type` 过滤**：CF 把 Div. 3 的场次 `type` 标成 `ICPC`，
     而 Div. 2 标成 `CF` —— 这一列跟赛制没关系。真正的 ICPC/VK Cup
     靠名字认（会落到「其它」，`target_order` 里没有，自然被排除）。
     """
+    if isinstance(payload, dict):
+        payload = payload.get("result")
     out = []
     for row in payload or []:
         if not isinstance(row, dict):
@@ -454,6 +463,18 @@ async def refresh(store, platform: str, *, handle: str = "",
         await store.save_vp(platform, [], ok=False,
                             detail="抓比赛列表失败：%s" % err)
         return False, "抓比赛列表失败：%s" % err, 0
+
+    # ★ CF 的 API 出错时也是**HTTP 200**，只是信封里写
+    # `{"status": "FAILED", "comment": "..."}` —— 不认这个的话会落进
+    # 下面「解析出 0 条」那一支，把对方明说的原因（限流、维护、
+    # handle 不存在…）丢掉，只剩下我们自己猜的「可能改版了」。
+    if platform == CF and isinstance(payload, dict):
+        status = str(payload.get("status") or "").upper()
+        if status and status != "OK":
+            why = str(payload.get("comment") or "").strip() or "对方没给原因"
+            await store.save_vp(platform, [], ok=False,
+                                detail="Codeforces 接口报错：%s" % why)
+            return False, "Codeforces 接口报错：%s" % why, 0
 
     items = parser(payload)
     if not items:
