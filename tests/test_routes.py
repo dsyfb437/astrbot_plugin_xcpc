@@ -141,7 +141,27 @@ def install_stub():
     class AstrMessageEvent:
         pass
 
+    class _CustomFilter:
+        """`astrbot.core.star.filter.custom_filter.CustomFilter` 是个 ABC，
+        子类必须实现 `filter(event, cfg)`。`main.py` 的 `BareGroupGuard`
+        继承的就是它 —— 桩里少这个属性，`import main` 直接 AttributeError。"""
+
+        def __init__(self, raise_error=True):
+            self.raise_error = raise_error
+
+        def filter(self, event, cfg):
+            raise NotImplementedError
+
+    class _GroupFilter:
+        def __init__(self):
+            self.custom_filter_list = []
+
+        def add_custom_filter(self, f):
+            self.custom_filter_list.append(f)
+
     class _Filter:
+        CustomFilter = _CustomFilter
+
         def command(self, *a, **kw):
             def deco(fn):
                 return fn
@@ -151,8 +171,14 @@ def install_stub():
         def command_group(self, group_name, *a, **kw):
             """`@filter.command_group("xcpc")` 这个装饰器执行完，函数名会被绑到
             一个带 `.command` 的组对象上（AstrBot 里是 RegisteringCommandable），
-            子指令再挂 `@xcpc.command`。这里照这个形状做。"""
+            子指令再挂 `@xcpc.command`。这里照这个形状做。
+
+            ★ 还要有 `.parent_group` —— 真机上 `main.py` 就是拿它挂
+            `BareGroupGuard` 的。
+            """
             class _Group:
+                parent_group = _GroupFilter()
+
                 def command(self, *a, **kw):
                     def deco(fn):
                         return fn

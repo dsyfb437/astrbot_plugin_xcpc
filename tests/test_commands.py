@@ -119,12 +119,77 @@ def install_stub():
     class AstrMessageEvent:
         pass
 
+    class CustomFilter:
+        """真的 `astrbot.core.star.filter.custom_filter.CustomFilter` 是个 ABC，
+        子类必须实现 `filter(event, cfg) -> bool`。"""
+
+        def __init__(self, raise_error=True):
+            self.raise_error = raise_error
+
+        def filter(self, event, cfg):
+            raise NotImplementedError
+
+    class CommandGroupFilter:
+        """真的 `astrbot/core/star/filter/command_group.py` 的 `CommandGroupFilter`。
+
+        ★ 这里**照抄它的 `filter()`**（源码里是 105-118 行），**包括那个
+        `raise ValueError("参数不足…")`** —— 那正是真机上把裸 `/xcpc` 抢走、
+        让我们自己的处理器永远轮不到的一行。
+
+        不把它抄进来的话，「加了 BareGroupGuard」这件事就永远验不了：
+        原来这个文件是**直接调 `bare_xcpc()`** 的，根本没走 AstrBot 的
+        过滤器循环 —— 和 `parse_cf` 那次是同一类失误（测试绕开了真正的调用方）。
+        """
+
+        def __init__(self, group_name: str):
+            self.group_name = group_name
+            self.custom_filter_list = []
+            self.sub_command_filters = []
+            #: 裸发组名时 raise 了几次 —— 测试要断言"一次都没 raise"
+            self.raises = 0
+
+        def add_custom_filter(self, custom_filter):
+            self.custom_filter_list.append(custom_filter)
+
+        def custom_filter_ok(self, event, cfg):
+            for f in self.custom_filter_list:
+                if not f.filter(event, cfg):
+                    return False
+            return True
+
+        def get_complete_command_names(self):
+            return [self.group_name]
+
+        def equals(self, message_str: str) -> bool:
+            return message_str in self.get_complete_command_names()
+
+        def startswith(self, message_str: str) -> bool:
+            return message_str.startswith(
+                tuple(self.get_complete_command_names()))
+
+        def filter(self, event, cfg) -> bool:
+            if not event.is_at_or_wake_command:
+                return False
+            # ↓ 这一步就是 BareGroupGuard 要抢在它前面溜走的地方
+            if not self.custom_filter_ok(event, cfg):
+                return False
+            if self.equals(event.message_str.strip()):
+                self.raises += 1
+                raise ValueError(
+                    "参数不足。%s 指令组下有如下指令，请参考：\n  └── 方案"
+                    % self.group_name)
+            return self.startswith(event.message_str)
+
     class _Filter:
         def __init__(self):
             #: 注册过的**完整指令名**（子指令带组名前缀），用来断言"没有裸指令"
             self.commands = []
             #: 注册过的指令组名
             self.groups = []
+            #: 注册过的指令组过滤器（`CommandGroupFilter` 真身），
+            #: 测试要拿它跑一遍 `filter()` 看会不会 raise
+            self.group_filters = []
+            self.CustomFilter = CustomFilter
 
         def command(self, *a, **kw):
             name = a[0] if a else kw.get("command_name", "")
@@ -148,11 +213,18 @@ def install_stub():
             装饰器执行完，函数名就被绑到那个对象上了，子指令再挂 `@xcpc.command`。
             这里照着这个形状做：装饰器返回一个带 `.command` 的组对象。
             子指令的完整名是 `组名 子名`（AstrBot::CommandFilter 就是这么拼的）。
+
+            ★ 还要有 `.parent_group` —— 真机上 `main.py` 就是拿它挂
+            `BareGroupGuard` 的（`xcpc.parent_group.add_custom_filter(...)`）。
             """
             outer = self
             outer.groups.append(group_name)
+            group_filter = CommandGroupFilter(group_name)
+            outer.group_filters.append(group_filter)
 
             class _Group:
+                parent_group = group_filter
+
                 def command(self, *a, **kw):
                     name = a[0] if a else kw.get("command_name", "")
                     alias = kw.get("alias") or set()
@@ -1209,6 +1281,56 @@ def test_block_cmd():
         for bad_msg in ("/xcpc 方案", "/xcpc方案", "/xcpc 打卡", "/xcpc 块",
                         "xcpcabc"):
             check("★ 不抢 %r" % bad_msg, not rx.match(bad_msg), "")
+
+        # ★★ 真机 bug 回归：「裸 /xcpc 还是返回指令组」。
+        # AstrBot 的 `CommandGroupFilter.filter()` 在消息正好等于组名时会
+        # `raise ValueError("参数不足…")`，waking_check 把它接住 → 回一条
+        # 「插件 astrbot_plugin_xcpc: 参数不足…」→ 再 `stop_event()`，
+        # 于是 `bare_xcpc` 永远轮不到。
+        # 这里把**真的那个 `filter()`** 跑一遍（stub 里照抄了源码逻辑），
+        # 验证挂了 `BareGroupGuard` 之后不再 raise，且子指令不受影响。
+        from astrbot.api.event import filter as filter_mod
+
+        class _Ev:
+            def __init__(self, text):
+                self.message_str = text
+                self.is_at_or_wake_command = True
+
+            def get_message_str(self):
+                return self.message_str
+
+        gfs = getattr(filter_mod, "group_filters", [])
+        check("指令组过滤器注册上了", len(gfs) >= 1, len(gfs))
+        gf = gfs[0]
+        check("★ 指令组挂了 BareGroupGuard 这道自定义过滤器",
+              len(gf.custom_filter_list) == 1,
+              [type(f).__name__ for f in gf.custom_filter_list])
+
+        before = gf.raises
+        for bare in ("xcpc", " xcpc ", "!xcpc", "／xcpc"):
+            try:
+                got = gf.filter(_Ev(bare), {})
+                check("★ 裸 %r 不再抛「参数不足」" % bare, got is False, got)
+            except ValueError as exc:
+                check("★ 裸 %r 不再抛「参数不足」" % bare, False, str(exc))
+        check("★★ 一次都没 raise（raise 一次就等于真机上又被抢走了）",
+              gf.raises == before, gf.raises)
+
+        for msg in ("xcpc 方案", "xcpc 打卡", "xcpc 块 背包", "xcpc vp"):
+            check("★ %r 仍然命中指令组（guard 没误伤子指令）" % msg,
+                  gf.filter(_Ev(msg), {}) is True, "")
+
+        # 反证：把 guard 摘掉，裸组名**必须**重新 raise ——
+        # 否则说明上面那几条断言什么都没测到。
+        saved = list(gf.custom_filter_list)
+        gf.custom_filter_list = []
+        try:
+            gf.filter(_Ev("xcpc"), {})
+            check("★ 反证：没有 guard 时裸组名会 raise", False, "居然没 raise")
+        except ValueError:
+            check("★ 反证：没有 guard 时裸组名会 raise", True, "")
+        finally:
+            gf.custom_filter_list = saved
 
         # 裸 /xcpc 要走完整的方案流程
         ev = await drive(p, "bare_xcpc", "/xcpc")

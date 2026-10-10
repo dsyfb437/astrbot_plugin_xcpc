@@ -115,7 +115,29 @@ _PKG_SCRIPT = textwrap.dedent('''
     quiet.addHandler(logging.NullHandler())
     quiet.setLevel(logging.CRITICAL)
 
+    class _CustomFilter:
+        """`astrbot.core.star.filter.custom_filter.CustomFilter` 是个 ABC，
+        子类必须实现 `filter(event, cfg)`。`main.py` 的 `BareGroupGuard`
+        继承的就是它 —— 桩里少这个属性，`import main` 直接 AttributeError。"""
+
+        def __init__(self, raise_error=True):
+            self.raise_error = raise_error
+
+        def filter(self, event, cfg):
+            raise NotImplementedError
+
+    class _GroupFilter:
+        def __init__(self):
+            self.custom_filter_list = []
+
+        def add_custom_filter(self, f):
+            self.custom_filter_list.append(f)
+
     class _Group:
+        #: 真机上是 `RegisteringCommandable.parent_group`（一个
+        #: `CommandGroupFilter`），`main.py` 拿它挂 `BareGroupGuard`。
+        parent_group = _GroupFilter()
+
         def command(self, *a, **kw):
             def deco(fn):
                 return fn
@@ -123,6 +145,8 @@ _PKG_SCRIPT = textwrap.dedent('''
         regex = command
 
     class _Filter:
+        CustomFilter = _CustomFilter
+
         def command(self, *a, **kw):
             def deco(fn):
                 return fn

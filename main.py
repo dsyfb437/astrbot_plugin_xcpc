@@ -187,6 +187,42 @@ GROUP_NAME = "xcpc"
 #: 否则 `/xcpc 方案` 这种带子命令的也会被它抢走。
 BARE_CMD_RE = re.compile(r"^\s*[/／!！#]?\s*%s\s*$" % GROUP_NAME, re.I)
 
+
+class BareGroupGuard(filter.CustomFilter):
+    """只做一件事：让**裸发组名**绕过 AstrBot 指令组自带的「参数不足」报错。
+
+    真机上踩出来的坑，不看 AstrBot 源码根本猜不到：
+
+      `astrbot/core/star/filter/command_group.py` 的 `CommandGroupFilter.filter()`
+      在 `event.message_str.strip()` **正好等于组名**时会直接
+      `raise ValueError("参数不足。xcpc 指令组下有如下指令，请参考：…" + 指令树)`。
+
+      这个 raise 发生在 `pipeline/waking_check/stage.py` 的过滤器循环里，
+      被 `except Exception` 接住 → 回一条「插件 astrbot_plugin_xcpc: 参数不足…」
+      → 再 `event.stop_event()`。**于是我们自己的裸 `/xcpc` 处理器永远轮不到**，
+      用户看到的就是那一坨指令树。
+
+      ★ 单测抓不到：`tests/test_commands.py` 是直接调 `bare_xcpc()` 的，
+      根本没走 AstrBot 的过滤器循环 —— 和 `parse_cf` 那次同一类失误
+      （「测试绕开了真正的调用方」）。
+
+    修法只能从 `custom_filter_ok` 下手 —— 它在 `filter()` 里排在 `equals()`
+    **之前**，返回 False 就直接早退，走不到 raise 那一行：
+
+        if not event.is_at_or_wake_command: return False
+        if not self.custom_filter_ok(event, cfg): return False   # ← 从这里溜走
+        if self.equals(event.message_str.strip()): raise ValueError(...)
+
+    所以这个 filter 对「裸组名」返回 False，对别的消息一律 True。
+    指令组自身 handler 命中与否没有别的副作用（`waking_check` 里
+    `is_group_cmd_handler` 为真的 handler **不会**进 `activated_handlers`），
+    子指令各自有自己的 `CommandFilter`，不受影响。
+    """
+
+    def filter(self, event: AstrMessageEvent, cfg) -> bool:      # noqa: ARG002
+        return not BARE_CMD_RE.search(str(event.get_message_str() or "").strip())
+
+
 #: 帮助里显示的指令前缀。写成常量，改组名时不用满文件找。
 CMD = "/" + GROUP_NAME
 
@@ -1370,12 +1406,19 @@ class XcpcPlugin(Star):
     # 挂进指令组之后完整名字是 `/xcpc 状态`，撞车的前提就没了。
     #
     # 调用形式：`/xcpc 绑定`、`/xcpc 方案 这周别安排 VP`。
-    # 单独发 `/xcpc` 会把这个组下面的指令列出来。
+    # 单独发 `/xcpc` 等于 `/xcpc 方案`（见下面的 BareGroupGuard）。
     # ======================================================================
     @filter.command_group(GROUP_NAME)
     def xcpc(self) -> None:
         """XCPC 备赛助手的指令组。"""
         pass
+
+    # ★ 必须挂这一道，否则裸发 `/xcpc` 会被 AstrBot 自己的「参数不足」
+    # 报错抢走（它会 `raise ValueError` 再 `stop_event()`，我们的
+    # `bare_xcpc` 根本轮不到）。理由与源码位置见 `BareGroupGuard`。
+    # `xcpc` 是装饰器返回的 `RegisteringCommandable`，`parent_group`
+    # 就是它背后那个 `CommandGroupFilter`。
+    xcpc.parent_group.add_custom_filter(BareGroupGuard())
 
     # ======================================================================
     # 指令：复盘
