@@ -103,7 +103,9 @@ DP_TOPICS: tuple[Topic, ...] = (
              "多数人卡住不是转移难，是状态压根没定义对。",
         lg=("线性 DP", "递推", "线性递推"), cf=(),
         lo=1000, hi=1400, count=15,
-        refs=("https://oi-wiki.org/dp/basic/",),
+        refs=("https://oi-wiki.org/dp/basic/",
+              "https://atcoder.jp/contests/dp/tasks",
+              "https://usaco.guide/gold/intro-dp"),
     ),
     Topic(
         key="dp_knapsack", module="dp", name="背包",
@@ -393,6 +395,20 @@ def has_source(topic: "Topic", platform: str) -> bool:
     于是 AtCoder / QOJ 会继承 CF 的答案，而 `matches()` 对它们返回 False。
     两个函数对同一个平台给出相反的回答，`pick_topic_candidates` 就会
     在 AtCoder 上"有货但一道都匹配不上"。**AtCoder 根本没有标签。**
+
+★ 两条从研究里学到的边界（完整依据见 `xcpc/research/09-topic-ladder.md`）：
+
+- **`g_bipartite` 在 CF 上只挂 `graph matchings`，会漏掉「染色/判定」那一半。**
+  研究用 CF 全量题库快照（11433 题）确认：染色类题（862B / 687A / 1144F / 1093D）
+  打的是 `dfs and similar`，只有匹配类才打 `graph matchings`。
+  故意**不**把 `dfs and similar` 补进来 —— 那样 `g_bipartite` 会和 `g_traverse`
+  大面积重题，等于把一个子专题稀释成"所有图的题"。染色那一半走洛谷的 `二分图`（166 道）。
+- **`rating == null` 的题必须单独处理。** CF 题库里有题（例如 398B）没有 rating，
+  拿 `None` 去比难度带会炸；`pick_topic_candidates` 的 `d is None` 分支就是干这个的。
+- 那个文件里还有一份「**不要写进候选池的题号**」清单：`CF:110D` 不存在、
+  `CF:1336E` 应为 `E1/E2`、`CF:1732D` 应为 `D1/D2`、`CF:380C` 不是区间 DP、
+  `CF:628C` 不是数位 DP、`CF:940F` 不是 DP 优化、`CF:919B` 不是拓扑、
+  `CF:1354D` 不是树链剖分、`CF:489B` 贪心可解不是匹配入门。
     """
     if platform == "luogu":
         return bool(topic.lg)
